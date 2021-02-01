@@ -13,4 +13,4 @@
 # Modify default IP
 #sed -i 's/192.168.1.1/192.168.50.5/g' package/base-files/files/bin/config_generate
 # Modify os-release
-sed -i 's/VERSION_ID="%v"/VERSION_ID="18.06"/g' package/base-files/files/usr/lib/os-release
+sed -i 's/VERSION_ID=".*"/VERSION_ID="18.06"/g' package/base-files/files/usr/lib/os-release
