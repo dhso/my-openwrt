@@ -17,4 +17,4 @@
 #sed -i '$a src-git lienol https://github.com/Lienol/openwrt-package' feeds.conf.default
 sed -i '$a src-git helloworld https://github.com/fw876/helloworld' feeds.conf.default
 sed -i '$a src-git oaf https://github.com/destan19/OpenAppFilter' feeds.conf.default
-sed -i '$a src-git dnsmasq-ipset https://github.com/lvqier/luci-app-dnsmasq-ipset' feeds.conf.default
+sed -i '$a src-git dnsmasqipset https://github.com/lvqier/luci-app-dnsmasq-ipset' feeds.conf.default
