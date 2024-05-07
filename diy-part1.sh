@@ -14,12 +14,13 @@
 # sed -i 's/^#\(.*helloworld\)/\1/' feeds.conf.default
 
 # Add a feed source
-#sed -i '$a src-git lienol https://github.com/Lienol/openwrt-package' feeds.conf.default
-sed -i '$a src-git helloworld https://github.com/fw876/helloworld' feeds.conf.default
-sed -i '$a src-git oaf https://github.com/destan19/OpenAppFilter' feeds.conf.default
-sed -i '$a src-git kenzo https://github.com/kenzok8/openwrt-packages' feeds.conf.default
-sed -i '$a src-git onliner https://github.com/rufengsuixing/luci-app-onliner' feeds.conf.default
-sed -i '$a src-git weburl https://github.com/gdck/luci-app-control-weburl' feeds.conf.default
-sed -i '$a src-git netspeedtest https://github.com/muink/luci-app-netspeedtest' feeds.conf.default
-sed -i '$a src-git lvqier https://github.com/lvqier/luci-app-dnsmasq-ipset' feeds.conf.default
-sed -i '$a src-git ddnsgo https://github.com/sirpdboy/luci-app-ddns-go' feeds.conf.default
+# echo 'src-git lienol https://github.com/Lienol/openwrt-package' >>feeds.conf.default
+echo 'src-git helloworld https://github.com/fw876/helloworld' >>feeds.conf.default
+echo 'src-git oaf https://github.com/destan19/OpenAppFilter' >>feeds.conf.default
+echo 'src-git kenzo https://github.com/kenzok8/openwrt-packages' >>feeds.conf.default
+echo 'src-git ddnsgo https://github.com/sirpdboy/luci-app-ddns-go' >>feeds.conf.default
+
+git clone https://github.com/rufengsuixing/luci-app-onliner package/luci-app-onliner
+git clone https://github.com/gdck/luci-app-control-weburl package/luci-app-control-weburl
+git clone https://github.com/muink/luci-app-netspeedtest package/luci-app-netspeedtest
+git clone https://github.com/lvqier/luci-app-dnsmasq-ipset package/luci-app-dnsmasq-ipset
