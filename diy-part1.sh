@@ -18,4 +18,7 @@
 sed -i '$a src-git helloworld https://github.com/fw876/helloworld' feeds.conf.default
 sed -i '$a src-git oaf https://github.com/destan19/OpenAppFilter' feeds.conf.default
 sed -i '$a src-git kenzo https://github.com/kenzok8/openwrt-packages' feeds.conf.default
-# sed -i '$a src-git ipset https://github.com/lvqier/luci-app-dnsmasq-ipset' feeds.conf.default
+sed -i '$a src-git onliner https://github.com/rufengsuixing/luci-app-onliner' feeds.conf.default
+sed -i '$a src-git weburl https://github.com/gdck/luci-app-control-weburl' feeds.conf.default
+sed -i '$a src-git netspeedtest https://github.com/muink/luci-app-netspeedtest' feeds.conf.default
+sed -i '$a src-git lvqier https://github.com/lvqier/luci-app-dnsmasq-ipset' feeds.conf.default
