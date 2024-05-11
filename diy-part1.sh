@@ -25,3 +25,4 @@ git clone https://github.com/gdck/luci-app-control-weburl package/luci-app-contr
 # git clone https://github.com/muink/luci-app-netspeedtest package/luci-app-netspeedtest
 git clone https://github.com/lvqier/luci-app-dnsmasq-ipset package/luci-app-dnsmasq-ipset
 git clone https://github.com/BH4EHN/openwrt-cloudflared.git package/cloudflared
+git clone https://github.com/lvqier/luci-app-dnsmasq-ipset.git package/luci-app-dnsmasq-ipset
