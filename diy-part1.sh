@@ -23,5 +23,5 @@ echo 'src-git ddnsgo https://github.com/sirpdboy/luci-app-ddns-go' >>feeds.conf.
 git clone https://github.com/rufengsuixing/luci-app-onliner package/luci-app-onliner
 git clone https://github.com/gdck/luci-app-control-weburl package/luci-app-control-weburl
 # git clone https://github.com/muink/luci-app-netspeedtest package/luci-app-netspeedtest
-git clone https://github.com/lvqier/luci-app-dnsmasq-ipset package/luci-app-dnsmasq-ipset
+# git clone https://github.com/lvqier/luci-app-dnsmasq-ipset package/luci-app-dnsmasq-ipset
 # git clone https://github.com/BH4EHN/openwrt-cloudflared.git package/cloudflared
