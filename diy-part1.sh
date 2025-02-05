@@ -26,22 +26,11 @@ function git_sparse_clone() {
 # Add a feed source
 # echo 'src-git lienol https://github.com/Lienol/openwrt-package' >>feeds.conf.default
 # echo 'src-git helloworld https://github.com/fw876/helloworld' >>feeds.conf.default
-# echo 'src-git oaf https://github.com/destan19/OpenAppFilter' >>feeds.conf.default
 # echo 'src-git kenzo https://github.com/kenzok8/openwrt-packages' >>feeds.conf.default
 echo 'src-git small https://github.com/kenzok8/small-package' >>feeds.conf.default
-echo 'src-git ddnsgo https://github.com/sirpdboy/luci-app-ddns-go' >>feeds.conf.default
 
 # 添加额外插件
-git clone --depth=1 https://github.com/rufengsuixing/luci-app-onliner package/luci-app-onliner
-git clone --depth=1 https://github.com/destan19/OpenAppFilter package/OpenAppFilter
+git clone --depth=1 https://github.com/BH4EHN/openwrt-cloudflared.git package/cloudflared
 
 # 科学上网插件
-git clone --depth=1 -b main https://github.com/fw876/helloworld package/luci-app-ssr-plus
-
-# msd_lite
-git clone --depth=1 https://github.com/ximiTech/luci-app-msd_lite package/luci-app-msd_lite
-git clone --depth=1 https://github.com/ximiTech/msd_lite package/msd_lite
-
-# git clone https://github.com/muink/luci-app-netspeedtest package/luci-app-netspeedtest
-# git clone https://github.com/lvqier/luci-app-dnsmasq-ipset package/luci-app-dnsmasq-ipset
-# git clone https://github.com/BH4EHN/openwrt-cloudflared.git package/cloudflared
+# git clone --depth=1 -b main https://github.com/fw876/helloworld package/luci-app-ssr-plus
