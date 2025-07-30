@@ -11,10 +11,10 @@
 #
 
 # Lean源码编译出错处理
-rm -rf feeds/smpackage/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb}
+rm -rf feeds/smpackage/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb,haproxy}
 
 # 移除要替换的包
-rm -rf feeds/packages/net/haproxy
+# rm -rf feeds/packages/net/haproxy
 
 # Git稀疏克隆，只克隆指定目录到本地
 function git_sparse_clone() {
