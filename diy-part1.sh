@@ -30,7 +30,7 @@ function git_sparse_clone() {
 echo 'src-git small https://github.com/kenzok8/small-package' >>feeds.conf.default
 
 # 添加额外插件
-git clone --depth=1 https://github.com/BH4EHN/openwrt-cloudflared.git package/cloudflared
+# git clone --depth=1 https://github.com/BH4EHN/openwrt-cloudflared.git package/cloudflared
 
 # 科学上网插件
 # git clone --depth=1 -b main https://github.com/fw876/helloworld package/luci-app-ssr-plus
