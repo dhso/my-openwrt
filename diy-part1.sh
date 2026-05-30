@@ -20,6 +20,7 @@ grep -qE '^src-git[[:space:]]+small[[:space:]]+' feeds.conf.default || sed -i '2
 
 ./scripts/feeds update -a
 rm -rf feeds/luci/applications/luci-app-mosdns
+rm -rf feeds/kenzo/luci-app-dockerman feeds/small/luci-app-dockerman
 rm -rf feeds/packages/net/{alist,adguardhome,mosdns,xray*,v2ray*,sing*,smartdns} feeds/packages/utils/v2dat feeds/packages/lang/golang feeds/*/luci-app-fchomo
 rm -rf feeds/small/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb}
 git clone --depth=1 --single-branch -b 1.26 https://github.com/kenzok8/golang feeds/packages/lang/golang
