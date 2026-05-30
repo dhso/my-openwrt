@@ -12,18 +12,12 @@
 
 set -euo pipefail
 
-# Uncomment a feed source
-# sed -i 's/^#\(.*helloworld\)/\1/' feeds.conf.default
-# sed -i '$a src-git small https://github.com/kenzok8/small-package' feeds.conf.default
-grep -qE '^src-git[[:space:]]+kenzo[[:space:]]+' feeds.conf.default || sed -i '1i src-git kenzo https://github.com/kenzok8/openwrt-packages' feeds.conf.default
-grep -qE '^src-git[[:space:]]+small[[:space:]]+' feeds.conf.default || sed -i '2i src-git small https://github.com/kenzok8/small' feeds.conf.default
-
 ./scripts/feeds update -a
-rm -rf feeds/luci/applications/luci-app-mosdns
-rm -rf feeds/kenzo/luci-app-dockerman feeds/small/luci-app-dockerman
-rm -rf feeds/packages/net/{alist,adguardhome,mosdns,xray*,v2ray*,sing*,smartdns} feeds/packages/utils/v2dat feeds/packages/lang/golang feeds/*/luci-app-fchomo
-rm -rf feeds/small/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb}
-git clone --depth=1 --single-branch -b 1.26 https://github.com/kenzok8/golang feeds/packages/lang/golang
+rm -rf feeds/packages/net/xray* feeds/packages/net/v2ray* feeds/packages/utils/v2dat
+rm -rf package/helloworld
+git clone --depth=1 https://github.com/fw876/helloworld.git package/helloworld
+rm -rf package/OpenAppFilter package/lean/{luci-app-oaf,open-app-filter,oaf} feeds/*/{luci-app-oaf,open-app-filter,oaf}
+git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
 ./scripts/feeds install -a
 # make menuconfig
 make defconfig
