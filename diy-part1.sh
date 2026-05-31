@@ -12,10 +12,14 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 ./scripts/feeds update -a
 rm -rf feeds/packages/net/xray* feeds/packages/net/v2ray* feeds/packages/utils/v2dat
 rm -rf package/helloworld
 git clone --depth=1 https://github.com/fw876/helloworld.git package/helloworld
+mkdir -p package/helloworld/gn/patches
+cp "$SCRIPT_DIR/100-compiler.patch" package/helloworld/gn/patches/100-compiler.patch
 rm -rf package/OpenAppFilter package/lean/{luci-app-oaf,open-app-filter,oaf} feeds/*/{luci-app-oaf,open-app-filter,oaf}
 git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
 ./scripts/feeds install -a
