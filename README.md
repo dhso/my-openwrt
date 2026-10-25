@@ -71,7 +71,7 @@ gzip -dc openwrt-*-combined-efi.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync st
 - host 工具和工具链按 LEDE 源码、配置和 Runner 编译环境的哈希精确匹配缓存，并在它们编译完成后立即保存，后续软件包编译失败也不会丢失。缓存异常时修改工作流中的 `TOOLCHAIN_CACHE_VERSION` 即可让全部旧缓存失效。
 - 启用 `AUTOREMOVE`，软件包编译完成后清理其构建目录，降低磁盘占用峰值。
 - 构建前会输出 CPU、内存、磁盘、块设备和 swap 信息；先安装依赖，再清理 Runner 中无关的大型工具链和 Docker 镜像并扩展工作区，扩容后再次确认磁盘布局。
-- 要求扩展后的构建卷至少为 30 GiB，并按阶段保留空间：下载前 14 GiB、未命中工具链缓存时 20 GiB（命中时 14 GiB）、固件编译前 14 GiB。不再用同一个 30 GiB 剩余空间门槛误判已经正常落盘的缓存和下载。
+- 按实际剩余空间设置分阶段保护：下载前 14 GiB、未命中工具链缓存时 20 GiB（命中时 14 GiB）、固件编译前 14 GiB。构建卷总容量仅用于诊断，不再以固定容量误判仍有足够空间的 Runner。
 - `packages.tar` 在归档软件包时同步移除源文件，避免产物准备阶段同时保存两份软件包占用。
 - 编译使用 `nproc + 1` 个任务，在 GitHub 托管 Runner 上兼顾 CPU 利用率和内存压力；失败时自动使用单任务详细日志重试。
 - 仅安装 LEDE 官方列出的 Ubuntu 构建依赖，不执行远程短链接脚本。
@@ -82,7 +82,7 @@ gzip -dc openwrt-*-combined-efi.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync st
 
 上游 LEDE 和 feeds 仍是滚动更新模型，因此不同 Release 可能包含不同上游版本。`source.buildinfo` 和 Release 说明中的提交号是复现及排查问题的依据。
 
-GitHub 托管 Runner 的实际硬件和初始可用容量由 GitHub 分配，工作流无法承诺固定物理容量。当前策略通过安装依赖后扩容、APT 缓存清理、构建卷容量与分阶段剩余空间检查，以及构建结束时的目录占用统计来避免在空间明显不足的 Runner 上浪费编译时间。
+GitHub 托管 Runner 的实际硬件和初始可用容量由 GitHub 分配，工作流无法承诺固定物理容量。当前策略通过安装依赖后扩容、APT 缓存清理、分阶段剩余空间检查，以及构建结束时的目录占用统计来避免在空间明显不足的 Runner 上浪费编译时间。
 
 ## 自定义
 
