@@ -28,7 +28,14 @@ env:
   HELLOWORLD_REF: 31b180df838e456bb36036bb8791f569af0fd661
   OPENAPPFILTER_REPO: https://github.com/destan19/OpenAppFilter.git
   OPENAPPFILTER_REF: 7fcf9e87dc75f7c28c74e09504a4efa0a2db3c92
-  MIN_FREE_SPACE_GIB: '30'
+  # The expanded workspace must be large enough for a complete build. Free
+  # space checks below are stage-specific because downloads and the toolchain
+  # are expected to consume space as the build progresses.
+  MIN_BUILD_VOLUME_GIB: '30'
+  MIN_FREE_BEFORE_DOWNLOAD_GIB: '14'
+  MIN_FREE_BEFORE_TOOLCHAIN_GIB: '20'
+  MIN_FREE_WITH_CACHED_TOOLCHAIN_GIB: '14'
+  MIN_FREE_BEFORE_FIRMWARE_GIB: '14'
   # Bump to discard every cached host tool and toolchain, for example if a
   # restored cache ever produces an inconsistent build.
   TOOLCHAIN_CACHE_VERSION: v1
@@ -54,30 +61,9 @@ jobs:
           df -hT
           swapon --show
 
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
-        with:
-          root-reserve-mb: 6144
-          temp-reserve-mb: 1024
-          swap-size-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-
-      # Must run after maximize-build-space: it re-creates and mounts the
-      # build volume, so anything checked out earlier would be hidden.
-      - name: Checkout build configuration
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Show disk layout after expansion
-        run: |
-          df -hT
-          lsblk
-          free -h
-          swapon --show
-
+      # Install to the root filesystem before maximize-build-space consumes
+      # most of its free blocks. This lets us reserve only 2 GiB on root while
+      # keeping apt reliable.
       - name: Install build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -97,6 +83,30 @@ jobs:
             wget xmlto xxd zlib1g-dev
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
+        with:
+          root-reserve-mb: 2048
+          temp-reserve-mb: 100
+          swap-size-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      # Must run after maximize-build-space: it re-creates and mounts the
+      # build volume, so anything checked out earlier would be hidden.
+      - name: Checkout build configuration
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Show disk layout after expansion
+        run: |
+          df -hT
+          lsblk
+          free -h
+          swapon --show
 
       - name: Fetch LEDE source
         id: source
@@ -196,16 +206,24 @@ jobs:
             ${{ env.OPENWRT_PATH }}/build_dir/toolchain-*
           key: lede-toolchain-${{ runner.os }}-${{ env.TOOLCHAIN_CACHE_VERSION }}-${{ env.DEVICE_TARGET }}-${{ env.TOOLCHAIN_HASH }}
 
-      - name: Check disk space before downloads
+      - name: Check build volume before downloads
         run: |
+          volume_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $2 }')"
           available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')"
-          required_kib="$(( MIN_FREE_SPACE_GIB * 1024 * 1024 ))"
+          required_volume_kib="$(( MIN_BUILD_VOLUME_GIB * 1024 * 1024 ))"
+          required_free_kib="$(( MIN_FREE_BEFORE_DOWNLOAD_GIB * 1024 * 1024 ))"
+          echo "Workspace volume size:      $(( volume_kib / 1024 / 1024 )) GiB"
           echo "Available workspace space: $(( available_kib / 1024 / 1024 )) GiB"
-          echo "Required workspace space:  ${MIN_FREE_SPACE_GIB} GiB"
+          echo "Minimum volume size:       ${MIN_BUILD_VOLUME_GIB} GiB"
+          echo "Required free space:       ${MIN_FREE_BEFORE_DOWNLOAD_GIB} GiB"
           df -hT "$GITHUB_WORKSPACE"
           du -sh "$OPENWRT_PATH"/dl "$OPENWRT_PATH"/.ccache 2>/dev/null || true
-          if (( available_kib < required_kib )); then
-            echo "::error::Insufficient disk space before downloads; at least ${MIN_FREE_SPACE_GIB} GiB is required"
+          if (( volume_kib < required_volume_kib )); then
+            echo "::error::Expanded workspace is too small; at least ${MIN_BUILD_VOLUME_GIB} GiB is required"
+            exit 1
+          fi
+          if (( available_kib < required_free_kib )); then
+            echo "::error::Insufficient disk space before downloads; at least ${MIN_FREE_BEFORE_DOWNLOAD_GIB} GiB must be free"
             exit 1
           fi
 
@@ -217,15 +235,22 @@ jobs:
           make download -j"$(nproc)"
 
       - name: Check disk space before toolchain compilation
+        env:
+          TOOLCHAIN_CACHE_HIT: ${{ steps.toolchain-cache.outputs.cache-hit }}
         run: |
           available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')"
-          required_kib="$(( MIN_FREE_SPACE_GIB * 1024 * 1024 ))"
+          required_gib="$MIN_FREE_BEFORE_TOOLCHAIN_GIB"
+          if [[ "${TOOLCHAIN_CACHE_HIT:-false}" == 'true' ]]; then
+            required_gib="$MIN_FREE_WITH_CACHED_TOOLCHAIN_GIB"
+          fi
+          required_kib="$(( required_gib * 1024 * 1024 ))"
+          echo "Toolchain cache hit:       ${TOOLCHAIN_CACHE_HIT:-false}"
           echo "Available workspace space: $(( available_kib / 1024 / 1024 )) GiB"
-          echo "Required workspace space:  ${MIN_FREE_SPACE_GIB} GiB"
+          echo "Required free space:       ${required_gib} GiB"
           df -hT "$GITHUB_WORKSPACE"
           du -sh "$OPENWRT_PATH"/dl "$OPENWRT_PATH"/.ccache 2>/dev/null || true
           if (( available_kib < required_kib )); then
-            echo "::error::Insufficient disk space before compilation; at least ${MIN_FREE_SPACE_GIB} GiB is required"
+            echo "::error::Insufficient disk space before toolchain compilation; at least ${required_gib} GiB must be free"
             exit 1
           fi
 
@@ -259,9 +284,9 @@ jobs:
       - name: Check disk space before firmware compilation
         run: |
           available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')"
-          required_kib="$(( MIN_FREE_SPACE_GIB * 1024 * 1024 ))"
+          required_kib="$(( MIN_FREE_BEFORE_FIRMWARE_GIB * 1024 * 1024 ))"
           echo "Available workspace space: $(( available_kib / 1024 / 1024 )) GiB"
-          echo "Required workspace space:  ${MIN_FREE_SPACE_GIB} GiB"
+          echo "Required free space:       ${MIN_FREE_BEFORE_FIRMWARE_GIB} GiB"
           df -hT "$GITHUB_WORKSPACE"
           du -sh \
             "$OPENWRT_PATH"/dl \
@@ -269,7 +294,7 @@ jobs:
             "$OPENWRT_PATH"/build_dir \
             "$OPENWRT_PATH"/staging_dir 2>/dev/null || true
           if (( available_kib < required_kib )); then
-            echo "::error::Insufficient disk space before firmware compilation; at least ${MIN_FREE_SPACE_GIB} GiB is required"
+            echo "::error::Insufficient disk space before firmware compilation; at least ${MIN_FREE_BEFORE_FIRMWARE_GIB} GiB must be free"
             exit 1
           fi
 
@@ -291,8 +316,10 @@ jobs:
           cp "$OPENWRT_PATH/.config" "$firmware_path/build.config"
 
           if [[ -d "$OPENWRT_PATH/bin/packages" ]]; then
-            # IPKs are already compressed; avoid wasting CI time recompressing them.
-            tar -C "$OPENWRT_PATH/bin" -cf "$firmware_path/packages.tar" packages
+            # IPKs are already compressed. Remove each archived file from the
+            # source tree to avoid keeping packages and packages.tar twice.
+            tar --remove-files -C "$OPENWRT_PATH/bin" \
+              -cf "$firmware_path/packages.tar" packages
           fi
 
           cat > "$firmware_path/source.buildinfo" <<EOF
