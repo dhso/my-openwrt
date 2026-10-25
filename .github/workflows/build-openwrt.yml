@@ -164,7 +164,7 @@ jobs:
           echo "TOOLCHAIN_HASH=$(sha256sum "$key_input" | cut -c1-16)" >> "$GITHUB_ENV"
 
       - name: Restore download cache
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.OPENWRT_PATH }}/dl
           key: lede-dl-${{ runner.os }}-${{ env.SOURCE_COMMIT }}
@@ -172,7 +172,7 @@ jobs:
             lede-dl-${{ runner.os }}-
 
       - name: Restore compiler cache
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.OPENWRT_PATH }}/.ccache
           key: lede-ccache-${{ runner.os }}-${{ env.DEVICE_TARGET }}-${{ hashFiles('openwrt/.config') }}-${{ env.SOURCE_COMMIT }}
