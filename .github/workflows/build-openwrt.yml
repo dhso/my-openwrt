@@ -1,241 +1,408 @@
-#
-# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-# Description: Build OpenWrt using GitHub Actions
-#
-
-name: Build OpenWrt
+name: Build LEDE x86_64
 
 on:
   repository_dispatch:
+    types: [source-code-update]
   workflow_dispatch:
     inputs:
-      ssh:
-        description: 'SSH connection to Actions'
-        required: false
-        default: 'false'
+      publish_release:
+        description: Publish an immutable GitHub Release
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lede-x86-64
+  cancel-in-progress: false
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_URL: https://github.com/coolsnowwolf/lede.git
   REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  FIRMWARE_RELEASE: true
-  FIRMWARE_TAG: X86_64
+  HELLOWORLD_REPO: https://github.com/fw876/helloworld.git
+  HELLOWORLD_REF: 31b180df838e456bb36036bb8791f569af0fd661
+  OPENAPPFILTER_REPO: https://github.com/destan19/OpenAppFilter.git
+  OPENAPPFILTER_REF: 7fcf9e87dc75f7c28c74e09504a4efa0a2db3c92
+  MIN_FREE_SPACE_GIB: '30'
+  # Bump to discard every cached host tool and toolchain, for example if a
+  # restored cache ever produces an inconsistent build.
+  TOOLCHAIN_CACHE_VERSION: v1
   TZ: Asia/Shanghai
 
-#     sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-1804)
 jobs:
-  Build:
+  build:
+    name: Build firmware
     runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    outputs:
+      artifact_name: ${{ steps.prepare.outputs.artifact_name }}
+      release_name: ${{ steps.prepare.outputs.release_name }}
+      release_tag: ${{ steps.prepare.outputs.release_tag }}
 
     steps:
-    - name: Check Server Performance
-      run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo -e "已知CPU型号(降序): 7763，8370C，8272CL，8171M，E5-2673\n"
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU物理数量: $(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
-        echo "CPU核心数量: $(nproc)"
-        echo -e "CPU型号信息:$(cat /proc/cpuinfo | grep -m1 name | awk -F: '{print $2}')\n"
-        echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息:"
-        echo -e "$(sudo lshw -short -C memory | grep GiB)\n"
-        echo "--------------------------硬盘信息--------------------------"
-        echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+      - name: Show runner configuration before cleanup
+        run: |
+          echo "CPU cores: $(nproc)"
+          lscpu
+          free -h
+          lsblk
+          df -hT
+          swapon --show
 
-    - name: "Optimize Disk Space"
-      uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
-      with:
-        operate_sudo: "True"
-        general_include: ".+"
-        general_exclude: |-
-          ^GCC$
-          ^G\+\+$
-          Clang
-          LLVM
-        docker_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        homebrew_prune: "True"
-        homebrew_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-        os_swap: "True"
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
+        with:
+          root-reserve-mb: 6144
+          temp-reserve-mb: 1024
+          swap-size-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
 
-    - name: Freeing up disk space
-      uses: easimon/maximize-build-space@master
-      with: 
-        root-reserve-mb: 1024
-        swap-size-mb: 1024
-        temp-reserve-mb: 100
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
+      # Must run after maximize-build-space: it re-creates and mounts the
+      # build volume, so anything checked out earlier would be hidden.
+      - name: Checkout build configuration
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-    - name: Initialization Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        # docker rmi $(docker images -q)
-        sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android $AGENT_TOOLSDIRECTORY
-        sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
-        sudo -E apt-get -y update
-        sudo -E apt-get -y install clang $(curl -fsSL is.gd/depends_ubuntu_2204)
-        sudo -E systemctl daemon-reload
-        sudo -E apt-get -y autoremove --purge
-        sudo -E apt-get -y clean
-        sudo timedatectl set-timezone "$TZ"
+      - name: Show disk layout after expansion
+        run: |
+          df -hT
+          lsblk
+          free -h
+          swapon --show
 
-    # - name: Combine Disks
-    #   uses: easimon/maximize-build-space@master
-    #   with:
-    #     swap-size-mb: 1024
-    #     temp-reserve-mb: 100
-    #     root-reserve-mb: 1024
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl \
+            device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
+            genisoimage git gperf haveged help2man intltool libc6-dev-i386 \
+            libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz \
+            msmtp ninja-build p7zip p7zip-full patch pkgconf python3 \
+            python3-pyelftools python3-setuptools qemu-utils rsync scons \
+            squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
+            wget xmlto xxd zlib1g-dev
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
-    - name: Checkout
-      uses: actions/checkout@main
+      - name: Fetch LEDE source
+        id: source
+        env:
+          REQUESTED_COMMIT: ${{ github.event.client_payload.source_commit }}
+        run: |
+          mkdir openwrt
+          git -C openwrt init --quiet
+          git -C openwrt remote add origin "$REPO_URL"
 
-    - name: Clone Source Code
-      run: |
-        df -hT $GITHUB_WORKSPACE
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        cd openwrt
-        echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-        COMMIT_AUTHOR=$(git show -s --date=short --format="作者: %an")
-        echo "COMMIT_AUTHOR=$COMMIT_AUTHOR" >> $GITHUB_ENV
-        COMMIT_DATE=$(git show -s --date=short --format="时间: %ci")
-        echo "COMMIT_DATE=$COMMIT_DATE" >> $GITHUB_ENV
-        COMMIT_MESSAGE=$(git show -s --date=short --format="内容: %s")
-        echo "COMMIT_MESSAGE=$COMMIT_MESSAGE" >> $GITHUB_ENV
-        COMMIT_HASH=$(git show -s --date=short --format="hash: %H")
-        echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+          if [[ -n "$REQUESTED_COMMIT" ]]; then
+            [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+            git -C openwrt fetch --depth=1 origin "$REQUESTED_COMMIT"
+          else
+            git -C openwrt fetch --depth=1 origin "refs/heads/$REPO_BRANCH"
+          fi
 
-    - name: Generate Variables
-      run: |
-        cp $CONFIG_FILE $OPENWRT_PATH/.config
-        cd $OPENWRT_PATH
-        make defconfig > /dev/null 2>&1
-        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
-        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
-        DEVICE_TARGET=$(cat .config | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}')
-        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
-        DEVICE_SUBTARGET=$(cat .config | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}')
-        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
+          git -C openwrt checkout --quiet --detach FETCH_HEAD
+          source_commit="$(git -C openwrt rev-parse HEAD)"
+          echo "OPENWRT_PATH=$GITHUB_WORKSPACE/openwrt" >> "$GITHUB_ENV"
+          echo "SOURCE_COMMIT=$source_commit" >> "$GITHUB_ENV"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
 
-    - name: Cache Toolchain
-      if: env.CACHE_TOOLCHAIN == 'true'
-      uses: HiGarfield/cachewrtbuild@main
-      with:
-        ccache: false
-        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
-        prefix: ${{ env.OPENWRT_PATH }}
+      - name: Prepare feeds and configuration
+        run: |
+          cp "$CONFIG_FILE" "$OPENWRT_PATH/.config.seed"
+          cd "$OPENWRT_PATH"
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          BUILD_VERSION="$(date +'%y.%m.%d')-${SOURCE_COMMIT:0:7}" \
+            "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          cp .config.seed .config
+          make defconfig
+          "$GITHUB_WORKSPACE/verify-config.sh" .config.seed .config
 
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+          device_target="$(sed -n 's/^CONFIG_TARGET_BOARD="\([^"]*\)"/\1/p' .config)"
+          device_subtarget="$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\([^"]*\)"/\1/p' .config)"
+          : "${device_target:?Unable to determine target board}"
+          : "${device_subtarget:?Unable to determine target subtarget}"
+          echo "DEVICE_TARGET=$device_target" >> "$GITHUB_ENV"
+          echo "DEVICE_SUBTARGET=$device_subtarget" >> "$GITHUB_ENV"
 
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+          # Toolchain cache key. Include the source trees plus shared build
+          # logic that can change generated host tools or compiler output. The
+          # inputs go to a file first so a failing command aborts the step
+          # instead of silently producing a weaker key.
+          key_input="$RUNNER_TEMP/toolchain-key-input"
+          {
+            git rev-parse \
+              HEAD:Config.in \
+              HEAD:Makefile \
+              HEAD:config \
+              HEAD:include \
+              HEAD:rules.mk \
+              HEAD:scripts \
+              HEAD:target/Config.in \
+              HEAD:target/linux/generic \
+              HEAD:target/linux/x86 \
+              HEAD:toolchain \
+              HEAD:tools
+            grep -E '^CONFIG_(TARGET_(BOARD|SUBTARGET|ARCH_PACKAGES|OPTIMIZATION)|ARCH=|CPU_TYPE|LIBC|USE_|GCC_|BINUTILS_|SOFT_FLOAT|LINUX_|DEVEL|CCACHE)' .config
+            printf '%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            gcc -dumpfullversion
+            getconf GNU_LIBC_VERSION
+          } > "$key_input"
+          echo "TOOLCHAIN_HASH=$(sha256sum "$key_input" | cut -c1-16)" >> "$GITHUB_ENV"
 
-    - name: SSH connection to Actions
-      uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
-      env:
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      - name: Restore download cache
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ env.OPENWRT_PATH }}/dl
+          key: lede-dl-${{ runner.os }}-${{ env.SOURCE_COMMIT }}
+          restore-keys: |
+            lede-dl-${{ runner.os }}-
 
-    - name: Download DL Package
-      run: |
-        cd $OPENWRT_PATH
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+      - name: Restore compiler cache
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ env.OPENWRT_PATH }}/.ccache
+          key: lede-ccache-${{ runner.os }}-${{ env.DEVICE_TARGET }}-${{ hashFiles('openwrt/.config') }}-${{ env.SOURCE_COMMIT }}
+          restore-keys: |
+            lede-ccache-${{ runner.os }}-${{ env.DEVICE_TARGET }}-${{ hashFiles('openwrt/.config') }}-
+            lede-ccache-${{ runner.os }}-${{ env.DEVICE_TARGET }}-
 
-    - name: Compile Firmware
-      id: compile
-      run: |
-        cd $OPENWRT_PATH
-        mkdir -p files/etc/uci-defaults
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
-        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+      # Host tools and the toolchain change rarely but take the longest to
+      # build. Restore only on an exact key match, so a stage built from
+      # different inputs is never mixed in. The matching save step runs right
+      # after they are built, so a later package failure does not lose them.
+      # The path list must stay identical in the restore and save steps.
+      - name: Restore toolchain cache
+        id: toolchain-cache
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            ${{ env.OPENWRT_PATH }}/staging_dir/host
+            ${{ env.OPENWRT_PATH }}/staging_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/build_dir/host
+            ${{ env.OPENWRT_PATH }}/build_dir/toolchain-*
+          key: lede-toolchain-${{ runner.os }}-${{ env.TOOLCHAIN_CACHE_VERSION }}-${{ env.DEVICE_TARGET }}-${{ env.TOOLCHAIN_HASH }}
 
-    - name: Check Space Usage
-      if: (!cancelled())
-      run: df -hT
+      - name: Check disk space before downloads
+        run: |
+          available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')"
+          required_kib="$(( MIN_FREE_SPACE_GIB * 1024 * 1024 ))"
+          echo "Available workspace space: $(( available_kib / 1024 / 1024 )) GiB"
+          echo "Required workspace space:  ${MIN_FREE_SPACE_GIB} GiB"
+          df -hT "$GITHUB_WORKSPACE"
+          du -sh "$OPENWRT_PATH"/dl "$OPENWRT_PATH"/.ccache 2>/dev/null || true
+          if (( available_kib < required_kib )); then
+            echo "::error::Insufficient disk space before downloads; at least ${MIN_FREE_SPACE_GIB} GiB is required"
+            exit 1
+          fi
 
-    - name: Upload Bin Directory
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      uses: actions/upload-artifact@main
-      with:
-        name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
-        path: ${{ env.OPENWRT_PATH }}/bin
+      - name: Download sources
+        run: |
+          cd "$OPENWRT_PATH"
+          make download -j"$(nproc)"
+          find dl -type f -size -1024c -print -delete
+          make download -j"$(nproc)"
 
-    - name: Organize Files
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        cd $OPENWRT_PATH/bin/targets/*/*
-        cat sha256sums
-        cp $OPENWRT_PATH/.config build.config
-        mv -f $OPENWRT_PATH/bin/packages/*/*/*.ipk packages
-        tar -zcf Packages.tar.gz packages
-        rm -rf packages feeds.buildinfo version.buildinfo
-        echo "KERNEL=$(cat *.manifest | grep ^kernel | cut -d- -f2 | tr -d ' ')" >> $GITHUB_ENV
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+      - name: Check disk space before toolchain compilation
+        run: |
+          available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')"
+          required_kib="$(( MIN_FREE_SPACE_GIB * 1024 * 1024 ))"
+          echo "Available workspace space: $(( available_kib / 1024 / 1024 )) GiB"
+          echo "Required workspace space:  ${MIN_FREE_SPACE_GIB} GiB"
+          df -hT "$GITHUB_WORKSPACE"
+          du -sh "$OPENWRT_PATH"/dl "$OPENWRT_PATH"/.ccache 2>/dev/null || true
+          if (( available_kib < required_kib )); then
+            echo "::error::Insufficient disk space before compilation; at least ${MIN_FREE_SPACE_GIB} GiB is required"
+            exit 1
+          fi
 
-    - name: Upload Firmware To Artifact
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
-      uses: actions/upload-artifact@main
-      with:
-        name: ${{ env.SOURCE_REPO }}-firmware-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE_PATH }}
+      - name: Build host tools and toolchain
+        env:
+          CCACHE_MAXSIZE: 2G
+          TOOLCHAIN_CACHE_HIT: ${{ steps.toolchain-cache.outputs.cache-hit }}
+        run: |
+          cd "$OPENWRT_PATH"
+          echo "Toolchain cache hit: ${TOOLCHAIN_CACHE_HIT:-false}"
+          jobs="$(( $(nproc) + 1 ))"
+          # With a cache hit this should be a no-op. If it starts compiling gcc
+          # or binutils anyway, the restored cache was not usable: check the
+          # key inputs above or bump TOOLCHAIN_CACHE_VERSION.
+          make -j"$jobs" tools/install toolchain/install \
+            || make -j1 V=s tools/install toolchain/install
+          du -sh staging_dir/host staging_dir/toolchain-* \
+            build_dir/host build_dir/toolchain-* 2>/dev/null || true
 
-    - name: Upload Firmware To Release
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
-      uses: ncipollo/release-action@v1
-      with:
-        name: R${{ env.DATE }} for ${{ env.FIRMWARE_TAG }}
-        allowUpdates: true
-        tag: ${{ env.FIRMWARE_TAG }}
-        token: ${{ secrets.GITHUB_TOKEN }}
-        artifacts: ${{ env.FIRMWARE_PATH }}/*
-        body: |
-          **This is OpenWrt Firmware for ${{ env.FIRMWARE_TAG }}**
-          ### 📒 固件信息
-          - 💻 平台架构: ${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
-          - ⚽ 固件源码: ${{ env.REPO_URL }}
-          - 💝 源码分支: ${{ env.REPO_BRANCH }}
-          - 🚀 内核版本: ${{ env.KERNEL }}
-          - 🌐 默认地址: 192.168.1.1
-          - 🔑 默认密码: password
-          ### 🧊 固件版本
-          - 固件编译前最后一次➦[主源码](${{ env.REPO_URL }})更新记录
-          - ${{ env.COMMIT_AUTHOR }}
-          - ${{ env.COMMIT_DATE }}
-          - ${{ env.COMMIT_MESSAGE }}
-          - ${{ env.COMMIT_HASH }}
+      - name: Save toolchain cache
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            ${{ env.OPENWRT_PATH }}/staging_dir/host
+            ${{ env.OPENWRT_PATH }}/staging_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/build_dir/host
+            ${{ env.OPENWRT_PATH }}/build_dir/toolchain-*
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Check disk space before firmware compilation
+        run: |
+          available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')"
+          required_kib="$(( MIN_FREE_SPACE_GIB * 1024 * 1024 ))"
+          echo "Available workspace space: $(( available_kib / 1024 / 1024 )) GiB"
+          echo "Required workspace space:  ${MIN_FREE_SPACE_GIB} GiB"
+          df -hT "$GITHUB_WORKSPACE"
+          du -sh \
+            "$OPENWRT_PATH"/dl \
+            "$OPENWRT_PATH"/.ccache \
+            "$OPENWRT_PATH"/build_dir \
+            "$OPENWRT_PATH"/staging_dir 2>/dev/null || true
+          if (( available_kib < required_kib )); then
+            echo "::error::Insufficient disk space before firmware compilation; at least ${MIN_FREE_SPACE_GIB} GiB is required"
+            exit 1
+          fi
+
+      - name: Compile firmware
+        env:
+          CCACHE_MAXSIZE: 2G
+        run: |
+          cd "$OPENWRT_PATH"
+          jobs="$(( $(nproc) + 1 ))"
+          make -j"$jobs" || make -j1 V=s
+
+      - name: Prepare firmware artifact
+        id: prepare
+        run: |
+          firmware_path="$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
+          : "${firmware_path:?Firmware path is empty}"
+          test -d "$firmware_path"
+
+          cp "$OPENWRT_PATH/.config" "$firmware_path/build.config"
+
+          if [[ -d "$OPENWRT_PATH/bin/packages" ]]; then
+            # IPKs are already compressed; avoid wasting CI time recompressing them.
+            tar -C "$OPENWRT_PATH/bin" -cf "$firmware_path/packages.tar" packages
+          fi
+
+          cat > "$firmware_path/source.buildinfo" <<EOF
+          BUILD_REPOSITORY=$GITHUB_REPOSITORY
+          BUILD_COMMIT=$GITHUB_SHA
+          LEDE_REPOSITORY=$REPO_URL
+          LEDE_COMMIT=$SOURCE_COMMIT
+          HELLOWORLD_REPOSITORY=$HELLOWORLD_REPO
+          HELLOWORLD_COMMIT=$HELLOWORLD_REF
+          OPENAPPFILTER_REPOSITORY=$OPENAPPFILTER_REPO
+          OPENAPPFILTER_COMMIT=$OPENAPPFILTER_REF
+          EOF
+
+          kernel_version="$(awk '$1 == "kernel" { print $3; exit }' "$firmware_path"/*.manifest)"
+          file_date="$(date +'%Y.%m.%d')"
+          release_tag="x86_64-${file_date}-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          release_name="LEDE x86_64 ${file_date} #${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+
+          cat > "$firmware_path/RELEASE_NOTES.md" <<EOF
+          基于 [coolsnowwolf/lede]($REPO_URL) 构建的 x86_64 固件。
+
+          - 构建配置：\`$GITHUB_SHA\`
+          - LEDE commit：\`$SOURCE_COMMIT\`
+          - 内核版本：\`$kernel_version\`
+          - 启动方式：Legacy BIOS / UEFI
+          - 默认地址：\`192.168.1.1\`
+          - 默认用户：\`root\`
+          - 默认密码：空（首次登录后必须立即设置）
+
+          <!-- LEDE_COMMIT=$SOURCE_COMMIT -->
+          EOF
+
+          (
+            cd "$firmware_path"
+            # RELEASE_NOTES.md is not uploaded as a release asset, so it must
+            # not be listed or `sha256sum -c` fails for every downloader.
+            find . -maxdepth 1 -type f \
+              ! -name sha256sums ! -name RELEASE_NOTES.md -print0 \
+              | sort -z \
+              | xargs -0 sha256sum
+          ) > "$firmware_path/sha256sums"
+
+          artifact_name="firmware-$release_tag"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "firmware_path=$firmware_path" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ${{ steps.prepare.outputs.artifact_name }}
+          path: ${{ steps.prepare.outputs.firmware_path }}
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Show final resource usage
+        if: always()
+        run: |
+          df -hT
+          free -h
+          if [[ -n "${OPENWRT_PATH:-}" && -d "$OPENWRT_PATH" ]]; then
+            du -sh \
+              "$OPENWRT_PATH"/dl \
+              "$OPENWRT_PATH"/.ccache \
+              "$OPENWRT_PATH"/build_dir \
+              "$OPENWRT_PATH"/staging_dir \
+              "$OPENWRT_PATH"/bin 2>/dev/null || true
+            if [[ -x "$OPENWRT_PATH/staging_dir/host/bin/ccache" ]]; then
+              CCACHE_DIR="$OPENWRT_PATH/.ccache" \
+                "$OPENWRT_PATH/staging_dir/host/bin/ccache" --show-stats || true
+            elif command -v ccache >/dev/null 2>&1; then
+              CCACHE_DIR="$OPENWRT_PATH/.ccache" ccache --show-stats || true
+            fi
+          fi
+
+  release:
+    name: Publish immutable release
+    needs: build
+    if: >-
+      needs.build.result == 'success' &&
+      (github.event_name == 'repository_dispatch' || inputs.publish_release)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: firmware
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ needs.build.outputs.release_name }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          notes_path="$PWD/firmware/RELEASE_NOTES.md"
+          mapfile -d '' artifacts < <(
+            find "$PWD/firmware" -maxdepth 1 -type f \
+              ! -name RELEASE_NOTES.md -print0 | sort -z
+          )
+          (( ${#artifacts[@]} > 0 ))
+          gh release create "$RELEASE_TAG" "${artifacts[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_NAME" \
+            --notes-file "$notes_path" \
+            --latest

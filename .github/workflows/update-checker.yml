@@ -1,59 +1,58 @@
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-#
-# File: .github/workflows/update-checker.yml
-# Description: Source code update checker
-#
-# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-
-name: Update Checker
-
-env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
+name: Check LEDE updates
 
 on:
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: Trigger a build even when LEDE has not changed
+        required: true
+        type: boolean
+        default: false
   schedule:
-    - cron: 0 0 * * 5
+    - cron: '0 0 * * 5'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lede-update-checker
+  cancel-in-progress: true
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede.git
+  REPO_BRANCH: master
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: Compare upstream revision
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
 
     steps:
+      - name: Trigger build when upstream changed
+        env:
+          FORCE_BUILD: ${{ inputs.force_build }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          upstream_commit="$(
+            git ls-remote "$REPO_URL" "refs/heads/$REPO_BRANCH" | awk '{ print $1 }'
+          )"
+          [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]
 
-    - name: Get Commit Hash
-      id: getHash
-      run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH .
-        echo "commitHash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          latest_body="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.body' 2>/dev/null || true
+          )"
 
-    - name: Compare Commit Hash
-      id: cacheHash
-      uses: actions/cache@v3
-      with:
-        path: .commitHash
-        key: commitHash_${{ steps.getHash.outputs.commitHash }}
+          if [[ "$FORCE_BUILD" != 'true' ]] && \
+             grep -Fq "LEDE_COMMIT=$upstream_commit" <<< "$latest_body"; then
+            echo "LEDE $upstream_commit has already been released."
+            exit 0
+          fi
 
-    - name: Save New Commit Hash
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      run: |
-        echo ${{ steps.getHash.outputs.commitHash }} | tee .commitHash
+          jq -n --arg commit "$upstream_commit" \
+            '{event_type:"source-code-update", client_payload:{source_commit:$commit}}' \
+            | gh api --method POST \
+                "repos/$GITHUB_REPOSITORY/dispatches" \
+                --input -
 
-    - name: Trigger build
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      uses: peter-evans/repository-dispatch@v2
-      with:
-        token: ${{ github.token }}
-        event-type: Source Code Update
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 0
-        keep_minimum_runs: 2
+          echo "Triggered build for LEDE $upstream_commit."
