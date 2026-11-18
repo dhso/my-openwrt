@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: lede-x86-64
   cancel-in-progress: false
@@ -34,9 +38,16 @@ env:
   MIN_FREE_BEFORE_TOOLCHAIN_GIB: '20'
   MIN_FREE_WITH_CACHED_TOOLCHAIN_GIB: '14'
   MIN_FREE_BEFORE_FIRMWARE_GIB: '14'
+  MIN_FREE_BEFORE_PACKAGE_GIB: '4'
+  MIN_FREE_BEFORE_HEAVY_PACKAGE_GIB: '14'
+  MIN_FREE_BEFORE_RUST_GIB: '20'
+  MIN_FREE_BEFORE_IMAGE_GIB: '4'
   # Bump to discard every cached host tool and toolchain, for example if a
   # restored cache ever produces an inconsistent build.
-  TOOLCHAIN_CACHE_VERSION: v1
+  TOOLCHAIN_CACHE_VERSION: v2
+  CCACHE_MAXSIZE: 2G
+  STAGED_BUILD_JOBS: '2'
+  STAGED_BUILD_RUST_JOBS: '1'
   TZ: Asia/Shanghai
 
 jobs:
@@ -60,8 +71,8 @@ jobs:
           swapon --show
 
       # Install to the root filesystem before maximize-build-space consumes
-      # most of its free blocks. This lets us reserve only 2 GiB on root while
-      # keeping apt reliable.
+      # most of its free blocks. Keep space on root for RUNNER_TEMP: the cache
+      # action creates its compressed archives there, outside the build volume.
       - name: Install build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -73,19 +84,19 @@ jobs:
             device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
             genisoimage git gperf haveged help2man intltool libc6-dev-i386 \
             libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libnsl-dev \
             libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz \
-            msmtp ninja-build p7zip p7zip-full patch pkgconf python3 \
+            ninja-build p7zip p7zip-full patch pkgconf python3 \
             python3-pyelftools python3-setuptools qemu-utils rsync scons \
             squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-            wget xmlto xxd zlib1g-dev
+            wget xmlto xxd xz-utils zlib1g-dev
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
       - name: Maximize build space
         uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
         with:
-          root-reserve-mb: 2048
+          root-reserve-mb: 6144
           temp-reserve-mb: 100
           swap-size-mb: 2048
           remove-dotnet: 'true'
@@ -99,12 +110,24 @@ jobs:
       - name: Checkout build configuration
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Check staged build helpers
+        run: python3 -B -m unittest discover -s tests
+
       - name: Show disk layout after expansion
         run: |
           df -hT
           lsblk
           free -h
           swapon --show
+          # Public standard runners normally have 4 CPUs/16 GB. Check the
+          # actual allocation and retain a conservative fallback for smaller VMs.
+          memory_mib="$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)"
+          rust_jobs=1
+          if (( $(nproc) >= 2 && memory_mib >= 12288 )); then
+            rust_jobs=2
+          fi
+          echo "RUST_BUILD_JOBS=$rust_jobs" >> "$GITHUB_ENV"
+          echo "Rust parallel jobs: $rust_jobs; RAM: $memory_mib MiB"
 
       - name: Fetch LEDE source
         id: source
@@ -137,7 +160,18 @@ jobs:
             "$GITHUB_WORKSPACE/$DIY_P2_SH"
           cp .config.seed .config
           make defconfig
+          # Resolve the full application set once. Include all its kernel
+          # modules in the base image so later installs cannot change the ABI.
+          python3 "$GITHUB_WORKSPACE/staged-build.py" promote-kmods --source "$OPENWRT_PATH"
+          make defconfig
           "$GITHUB_WORKSPACE/verify-config.sh" .config.seed .config
+          if grep -qE '^CONFIG_PACKAGE_kmod-.*=m$' .config; then
+            echo '::error::A required kernel module was not included in the base firmware'
+            exit 1
+          fi
+          # Apply limits at the actual Go/Rust recipe boundary before any
+          # package (including Xray in the base image) is compiled.
+          python3 "$GITHUB_WORKSPACE/staged-build.py" prepare-build --source "$OPENWRT_PATH"
 
           device_target="$(sed -n 's/^CONFIG_TARGET_BOARD="\([^"]*\)"/\1/p' .config)"
           device_subtarget="$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\([^"]*\)"/\1/p' .config)"
@@ -164,7 +198,10 @@ jobs:
               HEAD:target/linux/x86 \
               HEAD:toolchain \
               HEAD:tools
-            grep -E '^CONFIG_(TARGET_(BOARD|SUBTARGET|ARCH_PACKAGES|OPTIMIZATION)|ARCH=|CPU_TYPE|LIBC|USE_|GCC_|BINUTILS_|SOFT_FLOAT|LINUX_|DEVEL|CCACHE)' .config
+            # Keep all non-package settings, including disabled toolchain
+            # options. A partial allowlist can omit an ABI/compiler switch.
+            grep -E '^(CONFIG_|# CONFIG_.* is not set$)' .config \
+              | grep -vE '^(# )?CONFIG_PACKAGE_'
             printf '%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
             gcc -dumpfullversion
             getconf GNU_LIBC_VERSION
@@ -172,24 +209,30 @@ jobs:
           echo "TOOLCHAIN_HASH=$(sha256sum "$key_input" | cut -c1-16)" >> "$GITHUB_ENV"
 
       - name: Restore download cache
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        id: dl-cache
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ env.OPENWRT_PATH }}/dl
-          key: lede-dl-${{ runner.os }}-${{ env.SOURCE_COMMIT }}
+          # v2 snapshots may contain partially trimmed module directories.
+          key: lede-dl-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            lede-dl-${{ runner.os }}-
+            lede-dl-v3-${{ runner.os }}-
 
-      - name: Restore compiler cache
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+      - name: Restore C and Go build caches
+        id: ccache
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
-          path: ${{ env.OPENWRT_PATH }}/.ccache
-          key: lede-ccache-${{ runner.os }}-${{ env.DEVICE_TARGET }}-${{ hashFiles('openwrt/.config') }}-${{ env.SOURCE_COMMIT }}
+          path: |
+            ${{ env.OPENWRT_PATH }}/.ccache
+            ${{ env.OPENWRT_PATH }}/tmp/go-build
+          key: lede-build-cache-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.DEVICE_TARGET }}-${{ env.TOOLCHAIN_HASH }}-${{ hashFiles('openwrt/.config') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            lede-ccache-${{ runner.os }}-${{ env.DEVICE_TARGET }}-${{ hashFiles('openwrt/.config') }}-
-            lede-ccache-${{ runner.os }}-${{ env.DEVICE_TARGET }}-
+            lede-build-cache-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.DEVICE_TARGET }}-${{ env.TOOLCHAIN_HASH }}-${{ hashFiles('openwrt/.config') }}-
+            lede-build-cache-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.DEVICE_TARGET }}-${{ env.TOOLCHAIN_HASH }}-
+            lede-build-cache-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.DEVICE_TARGET }}-
 
-      # Host tools and the toolchain change rarely but take the longest to
-      # build. Restore only on an exact key match, so a stage built from
+      # Host tools and the toolchain are expensive to build. Restore only on
+      # an exact key match, so a stage built from
       # different inputs is never mixed in. The matching save step runs right
       # after they are built, so a later package failure does not lose them.
       # The path list must stay identical in the restore and save steps.
@@ -222,9 +265,9 @@ jobs:
       - name: Download sources
         run: |
           cd "$OPENWRT_PATH"
-          make download -j"$(nproc)"
-          find dl -type f -size -1024c -print -delete
-          make download -j"$(nproc)"
+          # package-m= changes the build schedule, not .config. Optional
+          # applications and their sources are handled after the firmware.
+          make download -j"$(nproc)" package-m=
 
       - name: Check disk space before toolchain compilation
         env:
@@ -248,22 +291,31 @@ jobs:
 
       - name: Build host tools and toolchain
         env:
-          CCACHE_MAXSIZE: 2G
           TOOLCHAIN_CACHE_HIT: ${{ steps.toolchain-cache.outputs.cache-hit }}
         run: |
           cd "$OPENWRT_PATH"
           echo "Toolchain cache hit: ${TOOLCHAIN_CACHE_HIT:-false}"
+          # Compiler payloads are not all installed yet. Keep this stage's
+          # entries isolated with the strict toolchain identity.
+          export CCACHE_NAMESPACE="tools-$TOOLCHAIN_HASH"
           jobs="$(( $(nproc) + 1 ))"
-          # With a cache hit this should be a no-op. If it starts compiling gcc
-          # or binutils anyway, the restored cache was not usable: check the
-          # key inputs above or bump TOOLCHAIN_CACHE_VERSION.
-          make -j"$jobs" tools/install toolchain/install \
-            || make -j1 V=s tools/install toolchain/install
+          # Fresh checkout timestamps can re-enter aggregate make targets;
+          # the retained per-package stamps avoid most actual compilation.
+          if ! make -j"$jobs" CCACHE_COMPILERCHECK=content tools/install toolchain/install; then
+            available_kib="$(df -Pk . | awk 'NR == 2 { print $4 }')"
+            available_inodes="$(df -Pi . | awk 'NR == 2 { print $4 }')"
+            if (( available_kib < 1048576 || available_inodes < 16384 )); then
+              echo '::error::Disk space or inodes exhausted; skipping toolchain retry'
+              exit 1
+            fi
+            make -j1 V=s CCACHE_COMPILERCHECK=content tools/install toolchain/install
+          fi
           du -sh staging_dir/host staging_dir/toolchain-* \
             build_dir/host build_dir/toolchain-* 2>/dev/null || true
 
       - name: Save toolchain cache
         if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: |
@@ -272,6 +324,13 @@ jobs:
             ${{ env.OPENWRT_PATH }}/build_dir/host
             ${{ env.OPENWRT_PATH }}/build_dir/toolchain-*
           key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Identify installed compilers for safe cross-build reuse
+        run: |
+          identity="$(python3 "$GITHUB_WORKSPACE/staged-build.py" compiler-cache-id --source "$OPENWRT_PATH")"
+          [[ "$identity" =~ ^[0-9a-f]{64}$ ]]
+          echo "CCACHE_NAMESPACE=firmware-$identity" >> "$GITHUB_ENV"
+          echo "Installed compiler identity: $identity"
 
       - name: Check disk space before firmware compilation
         run: |
@@ -290,30 +349,27 @@ jobs:
             exit 1
           fi
 
-      - name: Compile firmware
-        env:
-          CCACHE_MAXSIZE: 2G
+      - name: Compile base firmware without optional applications
         run: |
           cd "$OPENWRT_PATH"
           jobs="$(( $(nproc) + 1 ))"
-          make -j"$jobs" || make -j1 V=s
-
-      - name: Prepare firmware artifact
-        id: prepare
-        run: |
-          firmware_path="$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
-          : "${firmware_path:?Firmware path is empty}"
-          test -d "$firmware_path"
-
-          cp "$OPENWRT_PATH/.config" "$firmware_path/build.config"
-
-          if [[ -d "$OPENWRT_PATH/bin/packages" ]]; then
-            # IPKs are already compressed. Remove each archived file from the
-            # source tree to avoid keeping packages and packages.tar twice.
-            tar --remove-files -C "$OPENWRT_PATH/bin" \
-              -cf "$firmware_path/packages.tar" packages
+          if ! make -j"$jobs" CCACHE_COMPILERCHECK=content package-m=; then
+            available_kib="$(df -Pk . | awk 'NR == 2 { print $4 }')"
+            available_inodes="$(df -Pi . | awk 'NR == 2 { print $4 }')"
+            if (( available_kib < 1048576 || available_inodes < 16384 )); then
+              echo '::error::Disk space or inodes exhausted; skipping firmware retry'
+              exit 1
+            fi
+            STAGED_BUILD_JOBS=1 make -j1 V=s CCACHE_COMPILERCHECK=content package-m=
           fi
 
+      - name: Save base firmware configuration
+        id: base
+        run: |
+          firmware_path="$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
+          test -d "$firmware_path"
+          cp "$OPENWRT_PATH/.config" "$OPENWRT_PATH/.config.firmware"
+          cp "$OPENWRT_PATH/.config" "$firmware_path/build.config"
           cat > "$firmware_path/source.buildinfo" <<EOF
           BUILD_REPOSITORY=$GITHUB_REPOSITORY
           BUILD_COMMIT=$GITHUB_SHA
@@ -324,6 +380,82 @@ jobs:
           OPENAPPFILTER_REPOSITORY=$OPENAPPFILTER_REPO
           OPENAPPFILTER_COMMIT=$OPENAPPFILTER_REF
           EOF
+          python3 "$GITHUB_WORKSPACE/staged-build.py" verify-base \
+            --source "$OPENWRT_PATH" \
+            --requested-config "$OPENWRT_PATH/.config.seed" \
+            --firmware-dir "$firmware_path"
+          (
+            cd "$firmware_path"
+            find . -maxdepth 1 -type f ! -name sha256sums -print0 \
+              | sort -z | xargs -0 sha256sum
+          ) > "$firmware_path/sha256sums"
+          echo "firmware_path=$firmware_path" >> "$GITHUB_OUTPUT"
+
+      # Save the working firmware even if a later application fails to build.
+      - name: Upload base firmware before compiling applications
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: firmware-base-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.base.outputs.firmware_path }}
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Reclaim intermediate build space
+        run: |
+          python3 "$GITHUB_WORKSPACE/staged-build.py" cleanup \
+            --source "$OPENWRT_PATH" \
+            --firmware-dir "$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
+          df -hT "$GITHUB_WORKSPACE"
+          du -sh "$OPENWRT_PATH"/build_dir/* "$OPENWRT_PATH"/staging_dir/* 2>/dev/null || true
+
+      - name: Compile optional application packages one source at a time
+        run: |
+          # Keep the same .config, toolchain and kernel. Each target builds
+          # its dependencies; Shadowsocks Rust is last and uses the RAM-based limit.
+          python3 "$GITHUB_WORKSPACE/staged-build.py" packages \
+            --source "$OPENWRT_PATH" \
+            --requested-config "$OPENWRT_PATH/.config.seed" \
+            --jobs 2 \
+            --rust-jobs "$RUST_BUILD_JOBS" \
+            --min-free-gib "$MIN_FREE_BEFORE_PACKAGE_GIB" \
+            --heavy-min-free-gib "$MIN_FREE_BEFORE_HEAVY_PACKAGE_GIB" \
+            --rust-min-free-gib "$MIN_FREE_BEFORE_RUST_GIB"
+
+      - name: Embed compiled applications and generate full firmware
+        run: |
+          # Install the existing local packages and regenerate only images.
+          # A separate "full" prefix preserves the already uploaded base.
+          python3 "$GITHUB_WORKSPACE/staged-build.py" image \
+            --source "$OPENWRT_PATH" \
+            --requested-config "$OPENWRT_PATH/.config.seed" \
+            --firmware-dir "$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET" \
+            --image-min-free-gib "$MIN_FREE_BEFORE_IMAGE_GIB"
+
+      - name: Prepare firmware artifact
+        id: prepare
+        run: |
+          firmware_path="$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
+          : "${firmware_path:?Firmware path is empty}"
+          test -d "$firmware_path"
+
+          cp "$OPENWRT_PATH/.config" "$firmware_path/build.config"
+          cp "$OPENWRT_PATH/build-timings.json" "$firmware_path/build-timings.json"
+
+          package_paths=()
+          if [[ -d "$OPENWRT_PATH/bin/packages" ]]; then
+            package_paths+=(packages)
+          fi
+          if [[ -d "$firmware_path/packages" ]]; then
+            package_paths+=("targets/$DEVICE_TARGET/$DEVICE_SUBTARGET/packages")
+          fi
+          if (( ${#package_paths[@]} > 0 )); then
+            # Include target-specific packages as well as feed packages.
+            # IPK/APK files are compressed already; move them into the archive
+            # without retaining a second copy of every package.
+            tar --remove-files -C "$OPENWRT_PATH/bin" \
+              -cf "$firmware_path/packages.tar" "${package_paths[@]}"
+          fi
 
           kernel_version="$(awk '$1 == "kernel" { print $3; exit }' "$firmware_path"/*.manifest)"
           file_date="$(date +'%Y.%m.%d')"
@@ -340,6 +472,10 @@ jobs:
           - 默认地址：\`192.168.1.1\`
           - 默认用户：\`root\`
           - 默认密码：空（首次登录后必须立即设置）
+          - 推荐选择文件名带 \`-full-\` 的镜像：已内置 Docker、Shadowsocks Rust、Cloudflared 等全部已选应用
+          - 不带 \`-full-\` 的基础版内置 SSR Plus、Xray 和 SSR 客户端，可按需手动安装其余应用
+          - 第二阶段应用清单：\`deferred-packages.txt\`；完整镜像追加包清单：\`full-image-packages.txt\`
+          - 独立安装包及依赖仍保留在 \`packages.tar\`，请与同次构建的固件配套使用
 
           <!-- LEDE_COMMIT=$SOURCE_COMMIT -->
           EOF
@@ -369,18 +505,61 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # No make invocation follows these steps, even on a failed build. Trim
+      # only now so source cleanup cannot force downloads during compilation.
+      # Separate restore/save actions refresh caches on reruns of the same SHA.
+      - name: Bound download cache after all compilation
+        id: trim-cache
+        if: ${{ !cancelled() && steps.dl-cache.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          python3 "$GITHUB_WORKSPACE/staged-build.py" trim-download-cache \
+            --source "$OPENWRT_PATH" --download-cache-gib 2
+
+      - name: Save download cache
+        if: ${{ !cancelled() && steps.trim-cache.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ env.OPENWRT_PATH }}/dl
+          key: ${{ steps.dl-cache.outputs.cache-primary-key }}
+
+      - name: Bound C and Go build caches after all compilation
+        id: trim-build-caches
+        if: ${{ !cancelled() && steps.ccache.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          python3 "$GITHUB_WORKSPACE/staged-build.py" trim-build-caches \
+            --source "$OPENWRT_PATH" --go-cache-gib 1
+
+      - name: Save C and Go build caches
+        if: ${{ !cancelled() && steps.trim-build-caches.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            ${{ env.OPENWRT_PATH }}/.ccache
+            ${{ env.OPENWRT_PATH }}/tmp/go-build
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
       - name: Show final resource usage
         if: always()
         run: |
           df -hT
+          df -i
           free -h
           if [[ -n "${OPENWRT_PATH:-}" && -d "$OPENWRT_PATH" ]]; then
             du -sh \
               "$OPENWRT_PATH"/dl \
               "$OPENWRT_PATH"/.ccache \
+              "$OPENWRT_PATH"/tmp/go-build \
               "$OPENWRT_PATH"/build_dir \
               "$OPENWRT_PATH"/staging_dir \
               "$OPENWRT_PATH"/bin 2>/dev/null || true
+            du -sh "$OPENWRT_PATH"/build_dir/* 2>/dev/null || true
+            if [[ -f "$OPENWRT_PATH/build-timings.json" ]]; then
+              cat "$OPENWRT_PATH/build-timings.json"
+            fi
             if [[ -x "$OPENWRT_PATH/staging_dir/host/bin/ccache" ]]; then
               CCACHE_DIR="$OPENWRT_PATH/.ccache" \
                 "$OPENWRT_PATH/staging_dir/host/bin/ccache" --show-stats || true
@@ -388,6 +567,24 @@ jobs:
               CCACHE_DIR="$OPENWRT_PATH/.ccache" ccache --show-stats || true
             fi
           fi
+
+  cache-maintenance:
+    name: Retain bounded build-cache snapshots
+    needs: build
+    if: ${{ always() && !cancelled() && needs.build.result != 'skipped' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout cache policy
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prune obsolete snapshots for this branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 cache-policy.py --max-gib 8
 
   release:
     name: Publish immutable release

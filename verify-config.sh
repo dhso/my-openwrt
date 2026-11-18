@@ -29,7 +29,8 @@ while IFS= read -r setting; do
   [[ -n "$setting" ]] || continue
   symbol="${setting#\# }"
   symbol="${symbol% is not set}"
-  if resolved_value="$(grep -F -m1 -- "${symbol}=" "$RESOLVED_CONFIG")"; then
+  if resolved_value="$(awk -F= -v symbol="$symbol" \
+      '$1 == symbol { print; found=1; exit } END { exit !found }' "$RESOLVED_CONFIG")"; then
     echo "Configuration drift: $setting became $resolved_value" >&2
     missing=1
   fi
