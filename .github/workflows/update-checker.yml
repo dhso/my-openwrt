@@ -9,7 +9,8 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 0 * * 5'
+    # 08:00 UTC falls on the 1st in Los Angeles in both standard and daylight time.
+    - cron: '0 8 1 * *'
 
 permissions:
   contents: write

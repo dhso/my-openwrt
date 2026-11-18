@@ -67,7 +67,7 @@ gzip -dc *-full-*-combined-efi.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync sta
 
 进入仓库的 **Actions → Build LEDE x86_64 → Run workflow** 可手动构建。关闭 `publish_release` 时只生成保留 14 天的 Actions Artifact，不创建 Release。
 
-`Check LEDE updates` 每周五 `00:00 UTC` 检查一次上游。如果最新 Release 尚未包含当前 LEDE commit，它会触发一次构建；也可以手动运行并选择 `force_build` 强制构建。
+`Check LEDE updates` 在洛杉矶时间每月 1 日检查一次上游。仅当最新 Release 尚未包含当前 LEDE commit 时才触发编译，没有更新则跳过。GitHub cron 固定为 `08:00 UTC`，对应洛杉矶冬令时 `00:00`、夏令时 `01:00`。也可以手动运行并选择 `force_build` 强制构建。
 
 同一时间只允许一个固件构建运行，避免缓存和 Release 相互覆盖。编译任务最长运行 6 小时。
 
