@@ -91,7 +91,7 @@ gzip -dc *-full-*-combined-efi.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync sta
 - 下载和编译缓存使用每次运行独立的保存键，同一 commit 重跑也能更新快照；缓存保存失败不影响固件交付。独立的缓存维护 job 仅处理本工作流、本分支的缓存，工具链、编译、下载各保留一个最近使用的快照，总预算 8 GiB；预算不足时优先保留工具链，再保留编译缓存。其他分支及工作流的缓存不受影响，因此整个仓库的占用仍以 GitHub Caches 页面为准。
 - host 工具和工具链按 LEDE 源码、全部非软件包配置和 Runner 编译环境的哈希精确匹配缓存，并在它们编译完成后立即保存，后续软件包编译失败也不会丢失。缓存异常时修改工作流中的 `TOOLCHAIN_CACHE_VERSION` 即可让全部旧缓存失效。缓存恢复后的首次 make 可能重新检查时间戳，是否实际重新编译应以日志为准。
 - 启用 `AUTOREMOVE`，软件包编译完成后清理其构建目录，降低磁盘占用峰值。
-- 构建前会输出 CPU、内存、磁盘、块设备和 swap 信息；先安装依赖，再清理 Runner 中无关的大型工具链和 Docker 镜像并扩展工作区，扩容后再次确认磁盘布局。系统盘预留 6 GiB，供缓存 Action 在 `RUNNER_TEMP` 压缩归档等操作使用；这会比原来的 2 GiB 预留减少约 4 GiB 构建卷空间，避免只检查工作区却耗尽系统盘。
+- 构建前会输出 CPU、内存、磁盘、块设备和 swap 信息；先安装依赖，再清理 Runner 中无关的大型工具链和 Docker 镜像并扩展工作区。扩容前检测 `/` 与 `/mnt` 是否共用文件系统：共用时第一次分配预留 8 GiB，第二次分配后保留 6 GiB，避免扩容 Action 再次分配同一块盘后只剩 100 MiB；独立分区保持系统盘预留 6 GiB、`/mnt` 预留 100 MiB。扩容后立即输出磁盘布局，系统盘不足 5 GiB 就停止。系统盘预留供缓存 Action 在 `RUNNER_TEMP` 压缩归档等操作使用；构建和脚本测试的 `TMPDIR` 则放在构建卷中，避免大型临时文件消耗系统盘空间。
 - 按实际剩余空间设置分阶段保护：下载前 14 GiB、未命中工具链缓存时 20 GiB（命中时 14 GiB）、固件编译前 14 GiB；普通延后应用编译前 4 GiB，Docker、Cloudflared、FRP、ZeroTier 等大型后端 14 GiB，Shadowsocks Rust 20 GiB；完整固件组装前在清理后检查 4 GiB。应用阶段还检查可用 inode。门槛是提前检查，不能保证单个大型编译任务一定够用；磁盘不足时可结合最终目录统计调整阈值或换用更大的 Runner。
 - `packages.tar` 在归档软件包时同步移除源文件，避免产物准备阶段同时保存两份软件包占用。
 - 基础固件使用 `nproc + 1` 个 make 任务，应用源码目录逐个构建，每个默认 2 个任务。Go 的 `GOMAXPROCS` 和 `GOFLAGS=-p=N` 直接注入实际配方环境，防止被上游 `unexport` 清除，基础阶段的 Xray 同样受限；Cargo 设置 `CARGO_BUILD_JOBS`。Rust 在至少 2 核、12 GiB 内存的 Runner 上使用 2 个任务，较小 Runner 使用 1 个，并将任务数传给主机编译器 `x.py --jobs`。失败且仍有至少 1 GiB 空间和足够 inode 时，make、Go、Cargo、Rust bootstrap 一并降为单任务详细重试。上游配方锚点变化时立即停止。
@@ -113,7 +113,7 @@ GitHub 托管 Runner 的实际硬件和初始可用容量由 GitHub 分配，工
 - feeds、helloworld、OpenAppFilter：编辑 [`diy-part1.sh`](diy-part1.sh) 及工作流中的对应 commit。
 - 固件版本和默认设置：编辑 [`diy-part2.sh`](diy-part2.sh)。
 - 构建、缓存和发布行为：编辑 [`.github/workflows/build-openwrt.yml`](.github/workflows/build-openwrt.yml)。
-- 分阶段清理及应用编译顺序：编辑 [`staged-build.py`](staged-build.py)。脚本检查：`python3 -B -m unittest discover -s tests`，使用临时文件和模拟的 make 调用，不编译固件或应用。
+- 分阶段清理及应用编译顺序：编辑 [`staged-build.py`](staged-build.py)。脚本检查：`python3 -B -m unittest discover -s tests`，使用临时文件、模拟的 make 调用及固定的磁盘/inode 数据，不依赖宿主磁盘余量，也不编译固件或应用；资源不足场景单独模拟，保留真实构建中的空间保护。
 - 缓存快照保留策略：编辑 [`cache-policy.py`](cache-policy.py)，预算在工作流缓存维护 job 的 `--max-gib` 参数中调整。
 
 固件和应用只在 GitHub Actions 编译。本地仅检查脚本和工作流；完整构建、实际峰值磁盘占用和耗时需要以 Actions 的运行结果验证。

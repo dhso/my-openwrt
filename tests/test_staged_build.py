@@ -43,6 +43,15 @@ class StagedBuildTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.source = Path(self.temp.name)
+        # Test build decisions independently of the filesystem hosting /tmp.
+        # Individual resource-pressure tests override these ample defaults.
+        for resource_patch in (
+                patch.object(build.shutil, "disk_usage",
+                             return_value=SimpleNamespace(free=64 * 1024 ** 3)),
+                patch.object(build.os, "statvfs",
+                             return_value=SimpleNamespace(f_files=1000000, f_favail=900000))):
+            resource_patch.start()
+            self.addCleanup(resource_patch.stop)
         self.write("Makefile", "all:\n\t@true\n")
         self.write(".config", REQUESTED)
         self.write(".config.firmware", REQUESTED)
@@ -396,6 +405,17 @@ Build-Only: 1
                 with self.assertRaisesRegex(ValueError, "Insufficient free inodes"):
                     build.build_packages(self.args(), self.source)
         run.assert_not_called()
+
+    def test_no_retry_when_failure_exhausts_inodes(self):
+        stats = SimpleNamespace(f_files=100000, f_favail=1)
+        with patch.object(build, "ensure_space"), \
+                patch.object(build.os, "statvfs", return_value=stats), \
+                patch.object(build.subprocess, "run", side_effect=
+                             subprocess.CalledProcessError(2, "make")) as run:
+            with self.assertRaisesRegex(ValueError, "Insufficient free inodes"):
+                build.build_packages(self.args(), self.source)
+        self.assertEqual(run.call_count, 1)
+        self.assertFalse((self.source / ".packages-built.json").exists())
 
     def test_download_cache_trims_oldest_files_and_preserves_other_paths(self):
         old = self.write("dl/old.tar.xz")

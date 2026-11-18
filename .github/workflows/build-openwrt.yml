@@ -34,6 +34,7 @@ env:
   OPENAPPFILTER_REF: 7fcf9e87dc75f7c28c74e09504a4efa0a2db3c92
   # Free-space checks are stage-specific because downloads and the toolchain
   # are expected to consume space as the build progresses.
+  MIN_FREE_SYSTEM_GIB: '5'
   MIN_FREE_BEFORE_DOWNLOAD_GIB: '14'
   MIN_FREE_BEFORE_TOOLCHAIN_GIB: '20'
   MIN_FREE_WITH_CACHED_TOOLCHAIN_GIB: '14'
@@ -93,11 +94,29 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
+      - name: Select reserves for the runner disk layout
+        id: disk-reserves
+        run: |
+          root_reserve_mb=6144
+          temp_reserve_mb=100
+          # The action allocates a PV on /, then another on /mnt. Newer
+          # runners may put both paths on the same filesystem: the second
+          # allocation would consume the first reserve down to just 100 MiB.
+          if [[ "$(stat -c %d /)" == "$(stat -c %d /mnt)" ]]; then
+            echo '/ and /mnt share a filesystem; preserve 6 GiB after both allocations'
+            root_reserve_mb=8192
+            temp_reserve_mb=6144
+          fi
+          {
+            echo "root_reserve_mb=$root_reserve_mb"
+            echo "temp_reserve_mb=$temp_reserve_mb"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Maximize build space
         uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
         with:
-          root-reserve-mb: 6144
-          temp-reserve-mb: 100
+          root-reserve-mb: ${{ steps.disk-reserves.outputs.root_reserve_mb }}
+          temp-reserve-mb: ${{ steps.disk-reserves.outputs.temp_reserve_mb }}
           swap-size-mb: 2048
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -105,20 +124,19 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      # Must run after maximize-build-space: it re-creates and mounts the
-      # build volume, so anything checked out earlier would be hidden.
-      - name: Checkout build configuration
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Check staged build helpers
-        run: python3 -B -m unittest discover -s tests
-
       - name: Show disk layout after expansion
         run: |
           df -hT
           lsblk
           free -h
           swapon --show
+          # Target 6 GiB; allow overhead, but fail before any build if the
+          # action consumed the system reserve again. Caches use RUNNER_TEMP.
+          system_free_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          if (( system_free_kib < MIN_FREE_SYSTEM_GIB * 1024 * 1024 )); then
+            echo "::error::System filesystem must retain at least ${MIN_FREE_SYSTEM_GIB} GiB after expansion"
+            exit 1
+          fi
           # Public standard runners normally have 4 CPUs/16 GB. Check the
           # actual allocation and retain a conservative fallback for smaller VMs.
           memory_mib="$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)"
@@ -128,6 +146,19 @@ jobs:
           fi
           echo "RUST_BUILD_JOBS=$rust_jobs" >> "$GITHUB_ENV"
           echo "Rust parallel jobs: $rust_jobs; RAM: $memory_mib MiB"
+
+      # Must run after maximize-build-space: it re-creates and mounts the
+      # build volume, so anything checked out earlier would be hidden.
+      - name: Checkout build configuration
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Put build and test temporary files on the build volume
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+
+      - name: Check staged build helpers
+        run: python3 -B -m unittest discover -s tests
 
       - name: Fetch LEDE source
         id: source
