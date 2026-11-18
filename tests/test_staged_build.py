@@ -37,6 +37,36 @@ Package: golang
 Build-Only: 1
 """
 
+# Reduced fixture of the query in LEDE's json_overview_image_info.py.
+IMAGE_QUERY_SCRIPT = '''from os import environ
+from pathlib import Path
+from subprocess import run, PIPE
+from sys import argv
+import json
+
+def main():
+    default_packages, arch_packages = run(
+        [
+            "make",
+            "--no-print-directory",
+            "-C",
+            "target/linux/",
+            "val.DEFAULT_PACKAGES",
+            "val.ARCH_PACKAGES",
+        ],
+        stdout=PIPE,
+        stderr=PIPE,
+        check=True,
+        env=environ.copy().update({"TOPDIR": Path().cwd()}),
+        universal_newlines=True,
+    ).stdout.splitlines()
+    Path(argv[1]).write_text(json.dumps(dict(
+        default_packages=default_packages.split(), arch_packages=arch_packages)))
+
+if __name__ == "__main__":
+    main()
+'''
+
 
 class StagedBuildTests(unittest.TestCase):
     def setUp(self):
@@ -57,6 +87,7 @@ class StagedBuildTests(unittest.TestCase):
         self.write(".config.firmware", REQUESTED)
         self.write(".config.seed", REQUESTED)
         self.write("tmp/.packageinfo", METADATA)
+        self.write("scripts/json_overview_image_info.py", IMAGE_QUERY_SCRIPT)
         self.write("package/feeds/packages/rust/Makefile",
                    "define Host/Compile\n\t$(PYTHON) $(HOST_BUILD_DIR)/x.py \\\n\t\tdist rustc\nendef\n")
         self.write("package/feeds/packages/golang/golang-package.mk",
@@ -600,6 +631,69 @@ Build-Only: 1
             with self.assertRaisesRegex(ValueError, "Go package environment changed upstream"):
                 build.build_packages(self.args(), self.source)
         run.assert_not_called()
+
+    def test_image_metadata_query_survives_inherited_quiet_mode_and_sets_topdir(self):
+        script = self.source / "scripts/json_overview_image_info.py"
+        output = self.source / "profiles.json"
+        # These targets only print variables; no compiler or LEDE build runs.
+        # OpenWrt's verbose.mk emits status via $(info) when QUIET=1 and V!=s,
+        # which --silent alone cannot suppress.
+        self.write("target/linux/Makefile", f'''ifneq ($(realpath $(TOPDIR)),{self.source.resolve()})
+$(error TOPDIR was not forwarded)
+endif
+ifeq ($(QUIET),1)
+ifneq ($(V),s)
+$(info inherited make status output)
+endif
+endif
+DEFAULT_PACKAGES:=base-files libc
+ARCH_PACKAGES:=x86_64
+val.%:
+\t@printf '%s\\n' '$($*)'
+''')
+        env = dict(os.environ, QUIET="1", V="", OPENWRT_VERBOSE="", TOPDIR=str(self.source),
+                   MAKEFLAGS="", MFLAGS="", MAKEOVERRIDES="")
+        command = ["python3", "-B", str(script), str(output)]
+        original = subprocess.run(command, cwd=self.source, env=env,
+                                  capture_output=True, text=True)
+        self.assertNotEqual(original.returncode, 0)
+        self.assertIn("too many values to unpack", original.stderr)
+        build.configure_image_metadata(self.source)
+        # Verify the fixed subprocess receives an explicit, correct TOPDIR.
+        env["TOPDIR"] = "/invalid-inherited-topdir"
+        fixed = subprocess.run(command, cwd=self.source, env=env,
+                               capture_output=True, text=True)
+        self.assertEqual(fixed.returncode, 0, fixed.stderr)
+        self.assertEqual(json.loads(output.read_text()), dict(
+            default_packages=["base-files", "libc"], arch_packages="x86_64"))
+        # Unexpected data must still fail rather than silently dropping lines.
+        makefile = self.source / "target/linux/Makefile"
+        makefile.write_text(makefile.read_text() + "\n$(info unexpected query output)\n")
+        output.unlink()
+        malformed = subprocess.run(command, cwd=self.source, env=env,
+                                   capture_output=True, text=True)
+        self.assertNotEqual(malformed.returncode, 0)
+        self.assertIn("too many values to unpack", malformed.stderr)
+        self.assertFalse(output.exists())
+
+    def test_image_metadata_patch_is_idempotent(self):
+        build.configure_image_metadata(self.source)
+        script = self.source / "scripts/json_overview_image_info.py"
+        patched = script.read_bytes()
+        build.configure_image_metadata(self.source)
+        self.assertEqual(script.read_bytes(), patched)
+
+    def test_image_metadata_upstream_drift_stops_before_modifying_the_script(self):
+        build.configure_image_metadata(self.source)
+        patched = (self.source / "scripts/json_overview_image_info.py").read_text()
+        for original in (IMAGE_QUERY_SCRIPT.replace('"make",', '"gmake",'),
+                         IMAGE_QUERY_SCRIPT.replace('Path().cwd()', 'Path.cwd()'),
+                         patched + IMAGE_QUERY_SCRIPT):
+            with self.subTest(original=original):
+                script = self.write("scripts/json_overview_image_info.py", original)
+                with self.assertRaisesRegex(ValueError, "Image metadata query changed upstream"):
+                    build.configure_image_metadata(self.source)
+                self.assertEqual(script.read_text(), original)
 
     def test_rust_jobs_are_configurable_and_retry_reduces_bootstrap_jobs(self):
         args = self.args()

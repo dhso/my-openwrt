@@ -333,6 +333,28 @@ def limit_rust_bootstrap_jobs(source):
     path.write_text(content.replace(invocation + " \\\n", bounded + " \\\n", 1))
 
 
+def configure_image_metadata(source):
+    """Keep the upstream profile variable query free of make status output."""
+    path = source / "scripts/json_overview_image_info.py"
+    original = path.read_text()
+    content = original
+    patches = (
+        ('            "make",\n            "--no-print-directory",\n',
+         '            "make",\n            "--no-print-directory",\n'
+         '            "--silent",\n            "V=s",\n'),
+        ('env=environ.copy().update({"TOPDIR": Path().cwd()}),',
+         'env={**environ, "TOPDIR": str(Path.cwd())},'),
+    )
+    for before, after in patches:
+        if content.count(after) == 1 and before not in content.replace(after, "", 1):
+            continue
+        if after in content or content.count(before) != 1:
+            raise ValueError("Image metadata query changed upstream; review its output isolation")
+        content = content.replace(before, after, 1)
+    if content != original:
+        path.write_text(content)
+
+
 def configure_build_tools(source):
     packages = package_metadata((source / "tmp/.packageinfo").read_bytes())
     if "golang" not in packages:
@@ -354,6 +376,7 @@ def configure_build_tools(source):
             raise ValueError("Go package environment changed upstream; review its job limit")
         path.write_text(content.replace(anchor, bounded, 1))
     limit_rust_bootstrap_jobs(source)
+    configure_image_metadata(source)
 
 
 def package_command(args, target, jobs, verbose=False):

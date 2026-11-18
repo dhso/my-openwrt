@@ -100,6 +100,7 @@ gzip -dc *-full-*-combined-efi.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync sta
 - 显式关闭 BUILDBOT、SDK、ImageBuilder 及工具链/LLVM-BPF 归档，避免额外产物占用磁盘。
 - `make defconfig` 后验证所有显式配置；配置失效或被依赖覆盖时 CI 会立即失败，并显示要求值与实际解析值，缺失的符号标为 `absent`。
 - 包索引 `tmp/.packageinfo` 按字节读取，仅解码源码路径、包名和构建标记；说明或维护者信息中的旧编码字节不会中断构建。结构字段仍严格按 UTF-8 校验，编码损坏时报告行号；保留原索引内容，不影响上游构建工具读取。
+- 镜像汇总脚本查询默认包和架构时，显式使用 `--silent V=s`，避免继承 `QUIET=1` 后将 make 状态日志混入两行变量输出；同时修正子进程环境的 `TOPDIR` 传递。补丁在首次构建前应用，基础版和完整版均使用同一修复，上游查询代码变化时立即停止。
 - 明确禁止 LEDE profile 自动加入 Alist、UnblockMusic、JD DailyBonus、qBittorrent、TurboACC、UU 加速器及 VSFTPD；上游已删除的禁用项不会导致误报。
 - 构建、缓存维护和发布拆成不同 job：仅发布 job 具有 `contents: write`，仅缓存维护 job 具有 `actions: write`；缓存清理失败不影响固件发布。
 - 不再写入 LEDE 公共默认密码；固件首次登录后必须自行设置密码。
@@ -114,7 +115,7 @@ GitHub 托管 Runner 的实际硬件和初始可用容量由 GitHub 分配，工
 - feeds、helloworld、OpenAppFilter：编辑 [`diy-part1.sh`](diy-part1.sh) 及工作流中的对应 commit。
 - 固件版本和默认设置：编辑 [`diy-part2.sh`](diy-part2.sh)。
 - 构建、缓存和发布行为：编辑 [`.github/workflows/build-openwrt.yml`](.github/workflows/build-openwrt.yml)。
-- 分阶段清理及应用编译顺序：编辑 [`staged-build.py`](staged-build.py)。脚本检查：`python3 -B -m unittest discover -s tests`，使用临时文件、模拟的 make 调用及固定的磁盘/inode 数据，不依赖宿主磁盘余量，也不编译固件或应用；资源不足场景单独模拟，保留真实构建中的空间保护。
+- 分阶段清理及应用编译顺序：编辑 [`staged-build.py`](staged-build.py)。脚本检查：`python3 -B -m unittest discover -s tests`，使用临时文件、模拟的 make 调用及固定的磁盘/inode 数据，不依赖宿主磁盘余量；镜像汇总回归测试仅查询临时 Makefile 的变量，不编译固件或应用。资源不足场景单独模拟，保留真实构建中的空间保护。
 - 缓存快照保留策略：编辑 [`cache-policy.py`](cache-policy.py)，预算在工作流缓存维护 job 的 `--max-gib` 参数中调整。
 
 固件和应用只在 GitHub Actions 编译。本地仅检查脚本和工作流；完整构建、实际峰值磁盘占用和耗时需要以 Actions 的运行结果验证。
