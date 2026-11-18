@@ -20,10 +20,19 @@ def package_settings(config):
 
 
 def package_metadata(metadata):
+    """Parse structural fields without decoding arbitrary feed descriptions."""
     packages = {}
     source = None
     current = None
-    for line in metadata.splitlines():
+    for number, line in enumerate(metadata.splitlines(), 1):
+        if isinstance(line, bytes):
+            if not line.startswith((b"Source-Makefile: ", b"Package: ", b"Build-Only: ")):
+                continue
+            try:
+                line = line.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError(
+                    f"Invalid UTF-8 in package metadata field at line {number}") from error
         if line.startswith("Source-Makefile: "):
             path = PurePosixPath(line.split(": ", 1)[1])
             if (len(path.parts) < 3 or path.parts[0] != "package"
@@ -130,7 +139,7 @@ def validate_images(firmware_dir, config, full=False):
 def verify_base(source, requested_config, firmware_dir):
     require_saved_config(source)
     plan = package_plan(requested_config.read_text(), (source / ".config").read_text(),
-                        (source / "tmp/.packageinfo").read_text())
+                        (source / "tmp/.packageinfo").read_bytes())
     deferred = sorted(name for _, names in plan for name in names)
     manifests = sorted(path for path in firmware_dir.glob("*.manifest")
                        if "-full-" not in path.name)
@@ -306,7 +315,7 @@ def package_build_state(source, requested_config, plan):
 def limit_rust_bootstrap_jobs(source):
     # x.py computes its own parallelism, independently of make and Cargo's
     # environment. Patch only this known invocation, failing on upstream drift.
-    packages = package_metadata((source / "tmp/.packageinfo").read_text())
+    packages = package_metadata((source / "tmp/.packageinfo").read_bytes())
     if "rust" not in packages:
         raise ValueError("No Rust host compiler metadata found for the deferred Rust application")
     path = source / packages["rust"]["source"] / "Makefile"
@@ -325,7 +334,7 @@ def limit_rust_bootstrap_jobs(source):
 
 
 def configure_build_tools(source):
-    packages = package_metadata((source / "tmp/.packageinfo").read_text())
+    packages = package_metadata((source / "tmp/.packageinfo").read_bytes())
     if "golang" not in packages:
         raise ValueError("No Go host compiler metadata found")
     go_source = (source / packages["golang"]["source"]).resolve()
@@ -360,7 +369,7 @@ def build_packages(args, source):
         raise ValueError("Kernel state no longer matches the saved base firmware")
     plan = package_plan(args.requested_config.read_text(),
                         (source / ".config").read_text(),
-                        (source / "tmp/.packageinfo").read_text())
+                        (source / "tmp/.packageinfo").read_bytes())
     completed_state = package_build_state(source, args.requested_config, plan)
     configure_build_tools(source)
     compact_ccache(source)
@@ -421,7 +430,7 @@ def build_full_image(args, source):
     if not base_manifests:
         raise ValueError("No base firmware manifest found before embedding applications")
     selected = package_settings((source / ".config").read_text())
-    metadata = (source / "tmp/.packageinfo").read_text()
+    metadata = (source / "tmp/.packageinfo").read_bytes()
     packages = package_metadata(metadata)
     plan = package_plan(args.requested_config.read_text(),
                         (source / ".config").read_text(), metadata)

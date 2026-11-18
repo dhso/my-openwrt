@@ -149,6 +149,38 @@ Build-Only: 1
             build.package_plan(REQUESTED, REQUESTED,
                                METADATA.replace("package/feeds/luci", "package/../outside"))
 
+    def test_non_utf8_descriptions_preserve_package_metadata_and_build_plan(self):
+        metadata = METADATA.encode("utf-8").replace(
+            b"Package: luci-app-dockerman\n",
+            b"Package: luci-app-dockerman\nMaintainer: Ren\xe9\n"
+            b"Description: legacy text \xa1\xff\n")
+        self.assertEqual(build.package_metadata(metadata), build.package_metadata(METADATA))
+        self.assertEqual(build.package_plan(REQUESTED, REQUESTED, metadata),
+                         build.package_plan(REQUESTED, REQUESTED, METADATA))
+
+    def test_invalid_utf8_in_structural_metadata_fields_is_rejected(self):
+        for field in (b"Source-Makefile: package/invalid-\xff/Makefile\n",
+                      b"Package: invalid-\xff\n", b"Build-Only: \xff\n"):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    ValueError, "Invalid UTF-8 in package metadata field at line"):
+                build.package_metadata(METADATA.encode("utf-8") + field)
+
+    def test_non_utf8_metadata_survives_all_build_stages_without_rewriting_the_index(self):
+        run_make = self.prepare_full_image()
+        path = self.source / "tmp/.packageinfo"
+        metadata = path.read_bytes() + b"\nDescription: legacy text \xa1\xff\n"
+        path.write_bytes(metadata)
+        args = self.args()
+        with patch.object(build.subprocess, "run", side_effect=run_make):
+            build.configure_build_tools(self.source)
+            build.verify_base(self.source, args.requested_config, args.firmware_dir)
+            build.build_packages(args, self.source)
+            build.build_full_image(args, self.source)
+        self.assertEqual(path.read_bytes(), metadata)
+        embedded = (args.firmware_dir / "full-image-packages.txt").read_text().splitlines()
+        self.assertIn("shadowsocks-rust-sslocal", embedded)
+        self.assertIn("ddns-scripts-services", embedded)
+
     def test_cleanup_preserves_everything_needed_for_later_packages(self):
         preserved = [
             self.kernel + "/vmlinux", self.kernel + "/Module.symvers",

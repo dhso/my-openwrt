@@ -99,6 +99,7 @@ gzip -dc *-full-*-combined-efi.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync sta
 - Ubuntu 构建依赖基于 LEDE 官方清单，补齐 `libnsl-dev`、`xz-utils`，省略 CI 不需要的交互式编辑器和邮件工具，不执行远程短链接脚本。
 - 显式关闭 BUILDBOT、SDK、ImageBuilder 及工具链/LLVM-BPF 归档，避免额外产物占用磁盘。
 - `make defconfig` 后验证所有显式配置；配置失效或被依赖覆盖时 CI 会立即失败，并显示要求值与实际解析值，缺失的符号标为 `absent`。
+- 包索引 `tmp/.packageinfo` 按字节读取，仅解码源码路径、包名和构建标记；说明或维护者信息中的旧编码字节不会中断构建。结构字段仍严格按 UTF-8 校验，编码损坏时报告行号；保留原索引内容，不影响上游构建工具读取。
 - 明确禁止 LEDE profile 自动加入 Alist、UnblockMusic、JD DailyBonus、qBittorrent、TurboACC、UU 加速器及 VSFTPD；上游已删除的禁用项不会导致误报。
 - 构建、缓存维护和发布拆成不同 job：仅发布 job 具有 `contents: write`，仅缓存维护 job 具有 `actions: write`；缓存清理失败不影响固件发布。
 - 不再写入 LEDE 公共默认密码；固件首次登录后必须自行设置密码。
