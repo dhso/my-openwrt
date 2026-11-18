@@ -15,7 +15,9 @@ missing=0
 while IFS= read -r setting; do
   [[ -n "$setting" ]] || continue
   if ! grep -Fqx -- "$setting" "$RESOLVED_CONFIG"; then
-    echo "Configuration drift: $setting" >&2
+    resolved_setting="$(awk -F= -v symbol="${setting%%=*}" \
+      '$1 == symbol || $0 == "# " symbol " is not set" { print; exit }' "$RESOLVED_CONFIG")"
+    echo "Configuration drift: $setting (resolved: ${resolved_setting:-absent})" >&2
     missing=1
   fi
 done < <(

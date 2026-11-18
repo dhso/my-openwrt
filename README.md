@@ -21,7 +21,7 @@
 
 Docker、Shadowsocks Rust 客户端、Cloudflared、FRP、ZeroTier、MWAN3、SQM、DDNS、OpenAppFilter、流量统计、磁盘管理及其他可选应用，在基础固件完成并清理中间文件后再分批编译。应用及依赖随后自动安装到新的根文件系统，生成文件名带 **`-full-`** 的完整固件，刷机后直接可用，无需逐个手动安装。基础版和独立安装包同时保留。
 
-DDNS 安装包包含 Aliyun 和 Cloudflare；Oray 使用 `ddns-scripts-services` 内置的 `oray.com` 服务定义。
+DDNS 安装包包含 Aliyun、DNSPod 和 Cloudflare；Oray 使用 `ddns-scripts-services` 内置的 `oray.com` 服务定义。DDNS 后端、公共服务定义及这些提供商均在第二阶段编译；显式覆盖 LEDE 默认内置的 DNSPod，避免它将 DDNS 依赖提升到基础固件。
 
 为缩短构建时间并避免功能冲突，配置中未启用 OpenConnect、NaiveProxy、Kcptun、Mihomo、TurboACC、qBittorrent、VSFTPD 及旧式 OpenSSL 算法。SSR Plus 不包含任何服务端。基础固件用 Xray 和 ShadowsocksR 客户端提供代理功能；完整版额外内置 `shadowsocks-rust-sslocal`，SSR Plus 会检测并使用 `sslocal`。
 
@@ -98,7 +98,7 @@ gzip -dc *-full-*-combined-efi.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync sta
 - Rust 主机编译器目前仍按当前 feeds 源码构建，没有单独缓存成品或启用 sccache；它与基础工具链共用安装位置，需要额外处理恢复顺序和完整依赖，不能直接覆盖基础工具链缓存。后续是否值得增加该缓存，可根据 `build-timings.json` 和缓存占用判断。
 - Ubuntu 构建依赖基于 LEDE 官方清单，补齐 `libnsl-dev`、`xz-utils`，省略 CI 不需要的交互式编辑器和邮件工具，不执行远程短链接脚本。
 - 显式关闭 BUILDBOT、SDK、ImageBuilder 及工具链/LLVM-BPF 归档，避免额外产物占用磁盘。
-- `make defconfig` 后验证所有显式配置；配置失效或被依赖覆盖时 CI 会立即失败。
+- `make defconfig` 后验证所有显式配置；配置失效或被依赖覆盖时 CI 会立即失败，并显示要求值与实际解析值，缺失的符号标为 `absent`。
 - 明确禁止 LEDE profile 自动加入 Alist、UnblockMusic、JD DailyBonus、qBittorrent、TurboACC、UU 加速器及 VSFTPD；上游已删除的禁用项不会导致误报。
 - 构建、缓存维护和发布拆成不同 job：仅发布 job 具有 `contents: write`，仅缓存维护 job 具有 `actions: write`；缓存清理失败不影响固件发布。
 - 不再写入 LEDE 公共默认密码；固件首次登录后必须自行设置密码。

@@ -637,6 +637,20 @@ class VerifyConfigTests(unittest.TestCase):
     def test_explicit_package_selection_must_remain_unchanged(self):
         result = self.check_config("CONFIG_PACKAGE_foo=m\n", "CONFIG_PACKAGE_foo=y\n")
         self.assertEqual(result.returncode, 1)
+        self.assertIn("CONFIG_PACKAGE_foo=m (resolved: CONFIG_PACKAGE_foo=y)", result.stderr)
+
+    def test_removed_selection_reports_that_it_is_absent(self):
+        result = self.check_config("CONFIG_PACKAGE_foo=m\n", "CONFIG_PACKAGE_other=m\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("CONFIG_PACKAGE_foo=m (resolved: absent)", result.stderr)
+
+    def test_disabled_selection_reports_the_exact_resolved_symbol(self):
+        result = self.check_config("CONFIG_PACKAGE_foo=m\n",
+                                   "# CONFIG_PACKAGE_foo is not set\n"
+                                   "CONFIG_PACKAGE_foobar=m\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("CONFIG_PACKAGE_foo=m (resolved: # CONFIG_PACKAGE_foo is not set)",
+                      result.stderr)
 
 
 if __name__ == "__main__":
