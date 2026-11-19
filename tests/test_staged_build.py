@@ -69,6 +69,17 @@ if __name__ == "__main__":
     main()
 '''
 
+# Relevant branches of LEDE's package/Makefile. This fixture contains no
+# compile targets; the recipe expansion test below only records OPKG calls.
+ROOTFS_INSTALL_MAKEFILE = '''ifeq ($(CONFIG_USE_APK),y)
+package/install:
+\t$(call apk,$(TARGET_DIR)) add --no-cache --repository file://$(PACKAGE_DIR_ALL)/packages.adb app
+else
+package/install:
+\t$(call opkg,$(TARGET_DIR)) install $$(cat $(TMP_DIR)/opkg_install_list)
+endif
+'''
+
 
 def append_fwtool(image, kind=1, data=b'{"supported_devices":["x86-64"]}'):
     if kind == 1:
@@ -166,6 +177,7 @@ class StagedBuildTests(unittest.TestCase):
         self.write(".config.seed", REQUESTED)
         self.write("tmp/.packageinfo", METADATA)
         self.write("scripts/json_overview_image_info.py", IMAGE_QUERY_SCRIPT)
+        self.write("package/Makefile", ROOTFS_INSTALL_MAKEFILE)
         self.write("package/feeds/packages/rust/Makefile",
                    "define Host/Compile\n\t$(PYTHON) $(HOST_BUILD_DIR)/x.py \\\n\t\tdist rustc\nendef\n")
         self.write("package/feeds/packages/golang/golang-package.mk",
@@ -410,8 +422,9 @@ Build-Only: 1
         self.assertEqual(len(commands), 3)
         self.assertIn("package/install", commands[0])
         self.assertIn("CONFIG_TARGET_PER_DEVICE_ROOTFS=y", commands[0])
+        self.assertIn("V=s", commands[0])
         self.assertIn("base.default.install", " ".join(commands[0]))
-        self.assertEqual(commands[1], ["make", "-j1", "target/install", "EXTRA_IMAGE_NAME=full",
+        self.assertEqual(commands[1], ["make", "-j1", "V=s", "target/install", "EXTRA_IMAGE_NAME=full",
                                       "CCACHE_COMPILERCHECK=content"])
         self.assertFalse(any("world" in command or any(arg.endswith("/compile") for arg in command)
                              for command in commands))
@@ -435,6 +448,65 @@ Build-Only: 1
             with self.assertRaises(FileNotFoundError):
                 build.build_full_image(self.args(), self.source)
         run.assert_not_called()
+
+    def test_full_image_install_loads_only_the_local_feed_before_installing(self):
+        build.configure_full_image_install(self.source)
+        config = self.source / "tmp/full-image.opkg.conf"
+        self.write("tmp/opkg_install_list", "app.ipk\n")
+        # Record actual make/shell expansion, without an installed package
+        # manager or any compiler. No target firmware is built here.
+        recorder = self.write("record-opkg.py", '''import json, sys
+from pathlib import Path
+log = Path(sys.argv[1])
+args = sys.argv[2:]
+config = Path(args[args.index("-f") + 1]).read_text()
+with log.open("a") as stream:
+    stream.write(json.dumps([args, config]) + "\\n")
+''')
+        log = self.source / "opkg-calls.jsonl"
+        subprocess.run(["make", "--no-print-directory", "-f", "package/Makefile",
+                        "package/install", "TMP_DIR=" + str(self.source / "tmp"),
+                        "PACKAGE_DIR_ALL=" + str(self.source / "packages"),
+                        f"opkg=python3 {recorder} {log}"], cwd=self.source,
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([args for args, _ in calls], [
+            ["-f", str(config), "update"], ["-f", str(config), "install", "app.ipk"]])
+        self.assertEqual({feed for _, feed in calls},
+                         {"src full_image file://" + str(self.source / "packages") + "\n"})
+
+    def test_full_image_install_patch_is_idempotent_and_preserves_apk_recipe(self):
+        path = self.source / "package/Makefile"
+        apk_recipe = ROOTFS_INSTALL_MAKEFILE.split("else\n", 1)[0]
+        build.configure_full_image_install(self.source)
+        patched = path.read_bytes()
+        build.configure_full_image_install(self.source)
+        self.assertEqual(path.read_bytes(), patched)
+        self.assertTrue(path.read_text().startswith(apk_recipe))
+
+    def test_apk_full_image_install_does_not_need_an_opkg_patch(self):
+        self.write(".config", REQUESTED + "CONFIG_USE_APK=y\n")
+        path = self.write("package/Makefile", "# APK-only recipe\n")
+        build.configure_full_image_install(self.source)
+        self.assertEqual(path.read_text(), "# APK-only recipe\n")
+
+    def test_full_image_install_patch_stops_on_upstream_drift(self):
+        path = self.write("package/Makefile", ROOTFS_INSTALL_MAKEFILE.replace(
+            "opkg_install_list", "changed_install_list"))
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "OPKG rootfs install recipe changed upstream"):
+            build.configure_full_image_install(self.source)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_failed_rootfs_install_stops_before_generating_images(self):
+        self.prepare_full_image()
+        error = subprocess.CalledProcessError(2, "make")
+        with patch.object(build.subprocess, "run", side_effect=error) as run:
+            with self.assertRaisesRegex(ValueError, r"package/install failed \(exit 2\)"):
+                build.build_full_image(self.args(), self.source)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("V=s", run.call_args.args[0])
+        self.assertFalse((self.args().firmware_dir / "full-image-packages.txt").exists())
 
     def test_full_manifest_must_contain_every_requested_application(self):
         run_make = self.prepare_full_image()

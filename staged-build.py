@@ -498,6 +498,25 @@ def build_packages(args, source):
     (source / ".packages-built.json").write_text(json.dumps(completed_state, sort_keys=True) + "\n")
 
 
+def configure_full_image_install(source):
+    """Let OPKG resolve deferred runtime dependencies from the merged feed."""
+    if "CONFIG_USE_APK=y" in (source / ".config").read_text().splitlines():
+        return
+    path = source / "package/Makefile"
+    content = path.read_text()
+    original = '\t$(call opkg,$(TARGET_DIR)) install $$(cat $(TMP_DIR)/opkg_install_list)\n'
+    replacement = (
+        "\techo 'src full_image file://$(PACKAGE_DIR_ALL)' > $(TMP_DIR)/full-image.opkg.conf\n"
+        '\t$(call opkg,$(TARGET_DIR)) -f $(TMP_DIR)/full-image.opkg.conf update\n'
+        '\t$(call opkg,$(TARGET_DIR)) -f $(TMP_DIR)/full-image.opkg.conf '
+        'install $$(cat $(TMP_DIR)/opkg_install_list)\n')
+    if content.count(replacement) == 1 and original not in content:
+        return
+    if replacement in content or content.count(original) != 1:
+        raise ValueError("OPKG rootfs install recipe changed upstream; review local feed loading")
+    path.write_text(content.replace(original, replacement, 1))
+
+
 def build_full_image(args, source):
     require_saved_config(source)
     initial_state = json.loads((source / ".firmware-kernel-state.json").read_text())
@@ -532,6 +551,9 @@ def build_full_image(args, source):
         raise ValueError("No compiled base package install lists found")
     install_list = source / "tmp/full-image.install"
     install_list.write_text("\n".join(embedded) + "\n")
+    # Apply only after the base firmware and optional packages are complete.
+    # APK already passes the merged repository explicitly in its recipe.
+    configure_full_image_install(source)
 
     # No Rust compilation follows this point. Retain the kernel, image tools,
     # package files and installed libraries needed for rootfs assembly.
@@ -548,13 +570,17 @@ def build_full_image(args, source):
     # packages). Command-line overrides affect assembly only, leaving .config
     # and the kernel ABI unchanged. Enable merge-index for both APK and OPKG.
     install_arg = "PACKAGE_INSTALL_FILES=" + " ".join(map(str, [install_list] + install_files))
-    subprocess.run([args.make, "-j1", "package/install", install_arg,
-                    "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"], cwd=source, check=True)
+    try:
+        subprocess.run([args.make, "-j1", "V=s", "package/install", install_arg,
+                        "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"], cwd=source, check=True)
+    except subprocess.CalledProcessError as error:
+        raise ValueError(f"Full firmware package/install failed (exit {error.returncode}); "
+                         "see verbose make output above") from error
     if fingerprint(source) != initial_state:
         raise ValueError("Rootfs assembly changed the firmware/kernel configuration or ABI")
     # Invoke only image installation, never world/package/compile. The kernel
     # image is reused incrementally from the retained kernel build tree.
-    subprocess.run([args.make, "-j1", "target/install", "EXTRA_IMAGE_NAME=full",
+    subprocess.run([args.make, "-j1", "V=s", "target/install", "EXTRA_IMAGE_NAME=full",
                     "CCACHE_COMPILERCHECK=content"],
                    cwd=source, check=True)
     if fingerprint(source) != initial_state:
