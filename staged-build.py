@@ -9,6 +9,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -109,6 +110,58 @@ def manifest_packages(manifest):
     return packages
 
 
+def firmware_gzip_size(stream):
+    """Find the gzip boundary and verify any appended fwtool chunks' CRCs."""
+    end = stream.seek(0, os.SEEK_END)
+    checkpoints = []
+    # x86 recipes run gzip before append-metadata. fwtool chunks end with a
+    # big-endian trailer; its CRC covers all preceding bytes, not the trailer.
+    while end >= 16:
+        stream.seek(end - 16)
+        magic, checksum, kind, size = struct.unpack(">4sIB3xI", stream.read(16))
+        if magic != b"FWx0":
+            break
+        if kind not in (0, 1) or size < 16 or size > end:
+            raise ValueError("Invalid fwtool trailer type or size")
+        if kind == 1:
+            if size < 24:
+                raise ValueError("Truncated fwtool metadata header")
+            stream.seek(end - size)
+            if stream.read(4) != b"\x00" * 4:
+                raise ValueError("Unsupported fwtool metadata version")
+        checkpoints.append((end - 16, checksum))
+        end -= size
+
+    stream.seek(0)
+    position = checksum = 0
+    for boundary, expected in reversed(checkpoints):
+        while position < boundary:
+            chunk = stream.read(min(1024 * 1024, boundary - position))
+            if not chunk:
+                raise EOFError("Truncated fwtool data")
+            checksum = zlib.crc32(chunk, checksum)
+            position += len(chunk)
+        # fwtool uses the raw CRC accumulator without the final XOR.
+        if (checksum ^ 0xffffffff) != expected:
+            raise ValueError("fwtool CRC mismatch")
+    stream.seek(0)
+    return end
+
+
+class LimitedReader:
+    """Expose only the gzip prefix without changing the firmware on disk."""
+
+    def __init__(self, stream, size):
+        self.stream = stream
+        self.remaining = size
+
+    def read(self, size=-1):
+        size = self.remaining if size < 0 else min(size, self.remaining)
+        chunk = self.stream.read(size)
+        self.remaining -= len(chunk)
+        return chunk
+
+
 def validate_images(firmware_dir, config, full=False):
     images = []
     label = "full" if full else "base"
@@ -123,11 +176,13 @@ def validate_images(firmware_dir, config, full=False):
         for path in matches:
             size = 0
             try:
-                with gzip.open(path, "rb") as stream:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        size += len(chunk)
-            except (OSError, EOFError, zlib.error) as error:
-                raise ValueError("Invalid compressed firmware image: " + path.name) from error
+                with path.open("rb") as raw:
+                    payload = LimitedReader(raw, firmware_gzip_size(raw))
+                    with gzip.GzipFile(fileobj=payload, mode="rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            size += len(chunk)
+            except (OSError, EOFError, ValueError, zlib.error) as error:
+                raise ValueError(f"Invalid compressed firmware image: {path.name}: {error}") from error
             if not size:
                 raise ValueError("Empty firmware image: " + path.name)
         images.extend(matches)

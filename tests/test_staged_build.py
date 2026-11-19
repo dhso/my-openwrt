@@ -4,10 +4,12 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+import zlib
 
 
 spec = importlib.util.spec_from_file_location(
@@ -66,6 +68,82 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+
+
+def append_fwtool(image, kind=1, data=b'{"supported_devices":["x86-64"]}'):
+    if kind == 1:
+        data = struct.pack(">II", 0, 0) + data
+    prefix = image + data
+    return prefix + struct.pack(">4sIB3xI", b"FWx0",
+                                zlib.crc32(prefix) ^ 0xffffffff, kind, len(data) + 16)
+
+
+class FirmwareValidationTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name)
+        self.image = self.directory / "openwrt-x86-64-combined.img.gz"
+
+    def validate(self, data):
+        self.image.write_bytes(data)
+        result = build.validate_images(self.directory, "CONFIG_GRUB_IMAGES=y\n")
+        self.assertEqual(result, [self.image])
+        self.assertEqual(self.image.read_bytes(), data)
+
+    def test_plain_gzip_and_fwtool_metadata_signature_combinations(self):
+        image = gzip.compress(b"disk-image" * 1000)
+        for label, data in (
+                ("plain", image), ("metadata", append_fwtool(image)),
+                ("signature", append_fwtool(image, 0, b"signature")),
+                ("both", append_fwtool(append_fwtool(image), 0, b"signature"))):
+            with self.subTest(label=label):
+                self.validate(data)
+
+    def test_concatenated_gzip_members_and_padding_remain_supported(self):
+        self.validate(append_fwtool(gzip.compress(b"first") + gzip.compress(b"second")
+                                    + b"\x00" * 10))
+
+    def test_invalid_trailer_structure_and_unknown_trailing_data_are_rejected(self):
+        image = gzip.compress(b"disk-image")
+        metadata = append_fwtool(image)
+        bad_version = image + struct.pack(">II", 1, 0) + b"{}"
+        bad_version += struct.pack(">4sIB3xI", b"FWx0",
+                                   zlib.crc32(bad_version) ^ 0xffffffff, 1, 26)
+        for data in (image + b"garbage", metadata[:-1],
+                     metadata[:-16] + b"FAIL" + metadata[-12:],
+                     metadata[:-8] + b"\x02" + metadata[-7:],
+                     metadata[:-4] + struct.pack(">I", 15),
+                     metadata[:-4] + struct.pack(">I", len(metadata) + 1),
+                     metadata[:-4] + struct.pack(">I", 23), bad_version):
+            with self.subTest(tail=data[-16:]), self.assertRaisesRegex(
+                    ValueError, "Invalid compressed firmware image:.*combined.img.gz:"):
+                self.validate(data)
+
+    def test_fwtool_crc_checks_all_chunks_even_with_a_valid_outer_checksum(self):
+        image = append_fwtool(gzip.compress(b"disk-image"))
+        damaged = bytearray(image)
+        damaged[-12] ^= 1  # Corrupt inner metadata checksum, not its structure.
+        for data in (bytes(damaged), append_fwtool(bytes(damaged), 0, b"signature")):
+            with self.subTest(chunks=len(data)), self.assertRaisesRegex(
+                    ValueError, "fwtool CRC mismatch"):
+                self.validate(data)
+
+    def test_gzip_damage_is_rejected_even_with_valid_fwtool_checksums(self):
+        image = gzip.compress(b"disk-image" * 1000)
+        bad_crc = bytearray(image)
+        bad_crc[-8] ^= 1
+        for damaged in (image[:-1], bytes(bad_crc), b"not-gzip"):
+            for data in (damaged, append_fwtool(damaged)):
+                with self.subTest(tail=data[-16:]), self.assertRaisesRegex(
+                        ValueError, "Invalid compressed firmware image"):
+                    self.validate(data)
+
+    def test_empty_gzip_payload_is_rejected_with_and_without_metadata(self):
+        for data in (gzip.compress(b""), append_fwtool(gzip.compress(b""))):
+            with self.subTest(metadata=data[-16:-12]), self.assertRaisesRegex(
+                    ValueError, "Empty firmware image"):
+                self.validate(data)
 
 
 class StagedBuildTests(unittest.TestCase):
@@ -532,6 +610,27 @@ Build-Only: 1
         with patch.object(build.subprocess, "run", side_effect=corrupt_image):
             with self.assertRaisesRegex(ValueError, "Invalid compressed firmware image"):
                 build.build_full_image(self.args(), self.source)
+
+    def test_base_and_full_stages_accept_and_preserve_fwtool_images(self):
+        run_make = self.prepare_full_image()
+        args = self.args()
+
+        def append_trailers():
+            for path in args.firmware_dir.glob("*.img.gz"):
+                path.write_bytes(append_fwtool(append_fwtool(path.read_bytes()),
+                                              0, b"signature"))
+
+        append_trailers()
+        build.verify_base(self.source, args.requested_config, args.firmware_dir)
+
+        def make_with_trailers(command, **kwargs):
+            run_make(command, **kwargs)
+            if "target/install" in command:
+                for path in args.firmware_dir.glob("*-full-*.img.gz"):
+                    path.write_bytes(append_fwtool(path.read_bytes(), 0, b"signature"))
+
+        with patch.object(build.subprocess, "run", side_effect=make_with_trailers):
+            build.build_full_image(args, self.source)
 
     def test_full_image_cannot_overwrite_base_image(self):
         run_make = self.prepare_full_image()
